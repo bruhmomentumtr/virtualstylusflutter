@@ -64,22 +64,38 @@ bool FlutterWindow::OnCreate() {
 
           // Handle Shortcuts (action == 5)
           if (action == 5) {
-            int shortcutId = static_cast<int>(x);
-            INPUT inputs[4] = {};
-            if (shortcutId == 1) {
-              // Undo: Ctrl + Z
-              inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
-              inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'Z';
-              inputs[2].type = INPUT_KEYBOARD; inputs[2].ki.wVk = 'Z'; inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-              inputs[3].type = INPUT_KEYBOARD; inputs[3].ki.wVk = VK_CONTROL; inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-              SendInput(4, inputs, sizeof(INPUT));
-            } else if (shortcutId == 2) {
-              // Redo: Ctrl + Y
-              inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
-              inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'Y';
-              inputs[2].type = INPUT_KEYBOARD; inputs[2].ki.wVk = 'Y'; inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-              inputs[3].type = INPUT_KEYBOARD; inputs[3].ki.wVk = VK_CONTROL; inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-              SendInput(4, inputs, sizeof(INPUT));
+            int vkCode = static_cast<int>(x);
+            int modifiers = static_cast<int>(y);
+            
+            bool ctrl = (modifiers & 1) != 0;
+            bool shift = (modifiers & 2) != 0;
+            bool alt = (modifiers & 4) != 0;
+            bool win = (modifiers & 8) != 0;
+
+            int numInputs = 0;
+            INPUT inputs[10] = {};
+
+            // Key Down for Modifiers
+            if (ctrl) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_CONTROL; numInputs++; }
+            if (shift) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_SHIFT; numInputs++; }
+            if (alt) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_MENU; numInputs++; }
+            if (win) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_LWIN; numInputs++; }
+
+            // Key Down for Main Key
+            if (vkCode != 0) {
+              inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = vkCode; numInputs++;
+              // Key Up for Main Key
+              inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = vkCode; inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++;
+            }
+
+            // Key Up for Modifiers (reverse order)
+            if (win) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_LWIN; inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++; }
+            if (alt) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_MENU; inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++; }
+            if (shift) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_SHIFT; inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++; }
+            if (ctrl) { inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = VK_CONTROL; inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++; }
+
+            if (numInputs > 0) {
+              SendInput(numInputs, inputs, sizeof(INPUT));
             }
             result->Success();
             return;

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import '../core/network/udp_server.dart';
 import '../core/network/stylus_event.dart';
 
@@ -85,7 +86,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
             ),
             const SizedBox(height: 20),
             const Text(
-              'Enter this IP Address in the Android App:',
+              'Scan QR or Enter IP in Android App:',
               style: TextStyle(color: Colors.white70, fontSize: 18),
             ),
             const SizedBox(height: 10),
@@ -101,7 +102,21 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                 style: const TextStyle(color: Colors.greenAccent, fontSize: 36, fontWeight: FontWeight.bold, letterSpacing: 2),
               ),
             ),
-            const SizedBox(height: 40),
+            const SizedBox(height: 30),
+            if (_localIp.contains('.'))
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: QrImageView(
+                  data: _localIp,
+                  version: QrVersions.auto,
+                  size: 200.0,
+                ),
+              ),
+            const SizedBox(height: 30),
             const Text(
               'Listening on Port: 4000',
               style: TextStyle(color: Colors.white54, fontSize: 16),
