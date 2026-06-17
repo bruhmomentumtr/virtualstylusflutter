@@ -11,6 +11,8 @@ class UdpServer {
 
   Stream<StylusEvent> get events => _eventStreamController.stream;
 
+  String? lockedIp;
+
   Future<void> start() async {
     _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
     print('UDP Server listening on port $port');
@@ -19,6 +21,11 @@ class UdpServer {
       if (event == RawSocketEvent.read) {
         Datagram? datagram = _socket?.receive();
         if (datagram != null) {
+          // IP Filtering for Security (Anti-Multi-Device)
+          if (lockedIp != null && datagram.address.address != lockedIp) {
+            return; // Ignore packets from unauthorized devices
+          }
+          
           try {
             final stylusEvent = StylusEvent.fromBytes(datagram.data);
             _eventStreamController.add(stylusEvent);

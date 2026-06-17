@@ -8,7 +8,7 @@ class WebRtcSignaler {
   Socket? _socket;
   final int port;
   final Function(Map<String, dynamic> data)? onMessage;
-  final VoidCallback? onConnect;
+  final Function(String ip)? onConnect;
   final VoidCallback? onDisconnect;
 
   WebRtcSignaler({
@@ -30,7 +30,7 @@ class WebRtcSignaler {
           return;
         }
         _socket = socket;
-        if (onConnect != null) onConnect!();
+        if (onConnect != null) onConnect!(socket.remoteAddress.address);
         _listenToSocket();
       });
     } catch (e) {
@@ -43,7 +43,7 @@ class WebRtcSignaler {
     try {
       _socket = await Socket.connect(targetIp, port);
       debugPrint("Signaler connected to $targetIp:$port");
-      if (onConnect != null) onConnect!();
+      if (onConnect != null) onConnect!(targetIp);
       _listenToSocket();
     } catch (e) {
       debugPrint("Failed to connect signaler to $targetIp: $e");

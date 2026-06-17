@@ -22,6 +22,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
 
   // WebRTC
   bool _enableScreenMirroring = true;
+  String? _connectedIp;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
@@ -89,8 +90,20 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   Future<void> _startSignalingServer() async {
     _signaler = WebRtcSignaler(
       port: 4001,
-      onConnect: () => _setupWebRtcAndSendOffer(),
-      onDisconnect: () => _closeWebRtc(),
+      onConnect: (ip) {
+        setState(() {
+          _connectedIp = ip;
+        });
+        _server.lockedIp = ip;
+        _setupWebRtcAndSendOffer();
+      },
+      onDisconnect: () {
+        setState(() {
+          _connectedIp = null;
+        });
+        _server.lockedIp = null;
+        _closeWebRtc();
+      },
       onMessage: _handleSignalingMessage,
     );
     await _signaler!.startServer();
@@ -250,26 +263,33 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                         style: TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: 1.2),
                       ),
                       const SizedBox(height: 8),
-                      const Text(
-                        'Server is running and ready to connect',
-                        style: TextStyle(color: Colors.white60, fontSize: 16),
+                      Text(
+                        _connectedIp != null ? 'Client is connected securely.' : 'Server is running and ready to connect',
+                        style: TextStyle(color: _connectedIp != null ? Colors.greenAccent : Colors.white60, fontSize: 16),
                       ),
                       const SizedBox(height: 32),
                       
-                      // IP Display
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.3),
+                          color: _connectedIp != null ? Colors.green.withOpacity(0.2) : Colors.black.withOpacity(0.3),
                           borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.blueAccent.withOpacity(0.3), width: 1),
+                          border: Border.all(color: _connectedIp != null ? Colors.green.withOpacity(0.5) : Colors.blueAccent.withOpacity(0.3), width: 1),
                         ),
                         child: Column(
                           children: [
-                            const Text('LOCAL IP ADDRESS', style: TextStyle(color: Colors.blueAccent, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 2)),
+                            Text(
+                              _connectedIp != null ? 'CONNECTED DEVICE IP' : 'LOCAL IP ADDRESS', 
+                              style: TextStyle(
+                                color: _connectedIp != null ? Colors.greenAccent : Colors.blueAccent, 
+                                fontSize: 12, 
+                                fontWeight: FontWeight.bold, 
+                                letterSpacing: 2
+                              )
+                            ),
                             const SizedBox(height: 8),
                             Text(
-                              _localIp,
+                              _connectedIp ?? _localIp,
                               style: const TextStyle(color: Colors.white, fontSize: 42, fontWeight: FontWeight.w300, letterSpacing: 3),
                             ),
                           ],
@@ -277,7 +297,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                       ),
                       const SizedBox(height: 32),
 
-                      if (_localIp.contains('.'))
+                      if (_connectedIp == null && _localIp.contains('.'))
                         Container(
                           padding: const EdgeInsets.all(16),
                           decoration: BoxDecoration(
@@ -296,6 +316,12 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                           ),
                         ),
                       
+                      if (_connectedIp != null)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 40.0),
+                          child: Icon(Icons.check_circle_outline, size: 100, color: Colors.greenAccent),
+                        ),
+
                       const SizedBox(height: 32),
                       Row(
                         mainAxisSize: MainAxisSize.min,

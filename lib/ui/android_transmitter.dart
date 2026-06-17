@@ -113,10 +113,8 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-    // Connect WebRTC if enabled
-    if (_mirrorScreen) {
-      _startWebRtcSignaling(ip);
-    }
+    // Connect TCP for Handshake and WebRTC
+    _startWebRtcSignaling(ip);
   }
 
   Future<void> _startWebRtcSignaling(String targetIp) async {
@@ -154,12 +152,14 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       };
 
       _peerConnection!.onAddStream = (stream) {
-        _remoteRenderer.srcObject = stream;
-        setState(() {}); // trigger rebuild to show video
+        if (_mirrorScreen) {
+          _remoteRenderer.srcObject = stream;
+          setState(() {}); // trigger rebuild to show video
+        }
       };
 
       _peerConnection!.onTrack = (event) {
-        if (event.track.kind == 'video') {
+        if (_mirrorScreen && event.track.kind == 'video') {
           _remoteRenderer.srcObject = event.streams[0];
           setState(() {});
         }
