@@ -57,6 +57,8 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       action = EventAction.up;
     } else if (event is PointerCancelEvent) {
       action = EventAction.cancel;
+    } else if (event is PointerHoverEvent) {
+      action = EventAction.hover;
     }
 
     PointerKind kind = PointerKind.touch;
@@ -73,6 +75,19 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     );
 
     _client!.sendEvent(stylusEvent);
+  }
+
+  void _sendShortcut(int shortcutId) {
+    if (_client == null) return;
+    
+    final shortcutEvent = StylusEvent(
+      action: EventAction.shortcut,
+      kind: PointerKind.touch, // Kind doesn't matter for shortcuts
+      x: shortcutId.toDouble(), // We use 'x' to carry the shortcut ID
+      y: 0.0,
+      pressure: 0.0,
+    );
+    _client!.sendEvent(shortcutEvent);
   }
 
   @override
@@ -94,6 +109,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
               onPointerMove: _handlePointerEvent,
               onPointerUp: _handlePointerEvent,
               onPointerCancel: _handlePointerEvent,
+              onPointerHover: _handlePointerEvent,
               behavior: HitTestBehavior.opaque,
               child: const SizedBox.expand(),
             ),
@@ -103,6 +119,30 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
               child: IconButton(
                 icon: const Icon(Icons.close, color: Colors.white54, size: 32),
                 onPressed: _disconnect,
+              ),
+            ),
+            // Shortcuts UI
+            Positioned(
+              top: 40,
+              left: 20,
+              child: Row(
+                children: [
+                  FloatingActionButton(
+                    heroTag: 'undo',
+                    backgroundColor: Colors.white24,
+                    elevation: 0,
+                    onPressed: () => _sendShortcut(1), // 1 = Undo
+                    child: const Icon(Icons.undo, color: Colors.white),
+                  ),
+                  const SizedBox(width: 16),
+                  FloatingActionButton(
+                    heroTag: 'redo',
+                    backgroundColor: Colors.white24,
+                    elevation: 0,
+                    onPressed: () => _sendShortcut(2), // 2 = Redo
+                    child: const Icon(Icons.redo, color: Colors.white),
+                  ),
+                ],
               ),
             ),
           ],

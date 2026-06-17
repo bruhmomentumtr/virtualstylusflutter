@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-enum EventAction { down, move, up, cancel }
+enum EventAction { down, move, up, cancel, hover, shortcut }
 enum PointerKind { touch, stylus, invertedStylus, mouse }
 
 class StylusEvent {

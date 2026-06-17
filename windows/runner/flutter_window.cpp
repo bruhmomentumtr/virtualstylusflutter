@@ -45,11 +45,6 @@ bool FlutterWindow::OnCreate() {
       [this](const flutter::MethodCall<>& call,
              std::unique_ptr<flutter::MethodResult<>> result) {
         if (call.method_name() == "injectPenEvent") {
-          if (this->pointer_device_ == nullptr) {
-            result->Error("NO_DEVICE", "Synthetic pointer device not created");
-            return;
-          }
-
           const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
           if (!args) {
             result->Error("INVALID_ARGUMENTS", "Expected map arguments");
@@ -67,6 +62,34 @@ bool FlutterWindow::OnCreate() {
           double y = getDouble(args->at(flutter::EncodableValue("y")));
           double pressure = getDouble(args->at(flutter::EncodableValue("pressure")));
 
+          // Handle Shortcuts (action == 5)
+          if (action == 5) {
+            int shortcutId = static_cast<int>(x);
+            INPUT inputs[4] = {};
+            if (shortcutId == 1) {
+              // Undo: Ctrl + Z
+              inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
+              inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'Z';
+              inputs[2].type = INPUT_KEYBOARD; inputs[2].ki.wVk = 'Z'; inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+              inputs[3].type = INPUT_KEYBOARD; inputs[3].ki.wVk = VK_CONTROL; inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+              SendInput(4, inputs, sizeof(INPUT));
+            } else if (shortcutId == 2) {
+              // Redo: Ctrl + Y
+              inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
+              inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'Y';
+              inputs[2].type = INPUT_KEYBOARD; inputs[2].ki.wVk = 'Y'; inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+              inputs[3].type = INPUT_KEYBOARD; inputs[3].ki.wVk = VK_CONTROL; inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+              SendInput(4, inputs, sizeof(INPUT));
+            }
+            result->Success();
+            return;
+          }
+
+          if (this->pointer_device_ == nullptr) {
+            result->Error("NO_DEVICE", "Synthetic pointer device not created");
+            return;
+          }
+
           int screenWidth = GetSystemMetrics(SM_CXSCREEN);
           int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
@@ -76,15 +99,16 @@ bool FlutterWindow::OnCreate() {
           pointerInfo.penInfo.pointerInfo.pointerId = 1;
 
           // Action mapping
-          // 0: Down, 1: Move, 2: Up
+          // 0: Down, 1: Move, 2: Up, 3: Cancel, 4: Hover
           if (action == 0) {
             pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN;
           } else if (action == 1) {
             pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
           } else if (action == 2) {
             pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_UP;
-          } else {
-             // hover/cancel
+          } else if (action == 4) { // hover
+            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE;
+          } else { // cancel
             pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_UPDATE;
           }
 
