@@ -64,7 +64,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   ];
 
   // WebRTC
-  bool _mirrorScreen = false;
+  bool _mirrorScreen = true;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -80,7 +80,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _shortcutsOnLeft = prefs.getBool('shortcutsOnLeft') ?? true;
-      _mirrorScreen = prefs.getBool('mirrorScreen') ?? false;
+      _mirrorScreen = prefs.getBool('mirrorScreen') ?? true;
       final savedShortcuts = prefs.getString('shortcuts');
       if (savedShortcuts != null) {
         final List decoded = jsonDecode(savedShortcuts);
@@ -336,31 +336,45 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       flex: 92,
       child: Container(
         color: Colors.black,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            return Stack(
-              children: [
-                if (_mirrorScreen && _remoteRenderer.srcObject != null)
-                  Positioned.fill(
-                    child: RTCVideoView(
-                      _remoteRenderer,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                    ),
-                  ),
-                Positioned.fill(
-                  child: Listener(
-                    onPointerDown: (e) => _handlePointerEvent(e, constraints),
-                    onPointerMove: (e) => _handlePointerEvent(e, constraints),
-                    onPointerUp: (e) => _handlePointerEvent(e, constraints),
-                    onPointerCancel: (e) => _handlePointerEvent(e, constraints),
-                    onPointerHover: (e) => _handlePointerEvent(e, constraints),
-                    behavior: HitTestBehavior.opaque,
-                    child: const SizedBox.expand(),
-                  ),
+        child: Center(
+          child: ValueListenableBuilder<RTCVideoValue>(
+            valueListenable: _remoteRenderer,
+            builder: (context, value, child) {
+              double aspectRatio = 16.0 / 9.0;
+              if (value.width > 0 && value.height > 0) {
+                aspectRatio = value.aspectRatio;
+              }
+              return AspectRatio(
+                aspectRatio: aspectRatio,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    return Stack(
+                      children: [
+                        if (_mirrorScreen && _remoteRenderer.srcObject != null)
+                          Positioned.fill(
+                            child: RTCVideoView(
+                              _remoteRenderer,
+                              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                            ),
+                          ),
+                        Positioned.fill(
+                          child: Listener(
+                            onPointerDown: (e) => _handlePointerEvent(e, constraints),
+                            onPointerMove: (e) => _handlePointerEvent(e, constraints),
+                            onPointerUp: (e) => _handlePointerEvent(e, constraints),
+                            onPointerCancel: (e) => _handlePointerEvent(e, constraints),
+                            onPointerHover: (e) => _handlePointerEvent(e, constraints),
+                            behavior: HitTestBehavior.opaque,
+                            child: const SizedBox.expand(),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
-              ],
-            );
-          },
+              );
+            },
+          ),
         ),
       ),
     );

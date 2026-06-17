@@ -20,7 +20,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   String _localIp = 'Loading...';
 
   // WebRTC
-  bool _enableScreenMirroring = false;
+  bool _enableScreenMirroring = true;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
@@ -29,6 +29,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   void initState() {
     super.initState();
     _initServer();
+    _startSignalingServer();
   }
 
   Future<void> _initServer() async {
