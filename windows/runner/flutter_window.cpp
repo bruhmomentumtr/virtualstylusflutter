@@ -83,9 +83,9 @@ bool FlutterWindow::OnCreate() {
 
             // Key Down for Main Key
             if (vkCode != 0) {
-              inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = vkCode; numInputs++;
+              inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = static_cast<WORD>(vkCode); numInputs++;
               // Key Up for Main Key
-              inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = vkCode; inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++;
+              inputs[numInputs].type = INPUT_KEYBOARD; inputs[numInputs].ki.wVk = static_cast<WORD>(vkCode); inputs[numInputs].ki.dwFlags = KEYEVENTF_KEYUP; numInputs++;
             }
 
             // Key Up for Modifiers (reverse order)
