@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../core/network/udp_client.dart';
 import '../core/network/stylus_event.dart';
+import '../core/network/webrtc_signaler.dart';
 
 class ShortcutItem {
   final String label;
@@ -54,16 +56,24 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     ShortcutItem(label: 'Redo', icon: Icons.redo, vkCode: 89, modifiers: 1), // Y + Ctrl
   ];
 
+  // WebRTC
+  bool _mirrorScreen = false;
+  WebRtcSignaler? _signaler;
+  RTCPeerConnection? _peerConnection;
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+
   @override
   void initState() {
     super.initState();
     _loadPrefs();
+    _remoteRenderer.initialize();
   }
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _shortcutsOnLeft = prefs.getBool('shortcutsOnLeft') ?? true;
+      _mirrorScreen = prefs.getBool('mirrorScreen') ?? false;
       final savedShortcuts = prefs.getString('shortcuts');
       if (savedShortcuts != null) {
         final List decoded = jsonDecode(savedShortcuts);
@@ -75,6 +85,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('shortcutsOnLeft', _shortcutsOnLeft);
+    await prefs.setBool('mirrorScreen', _mirrorScreen);
     final encoded = jsonEncode(_shortcuts.map((e) => e.toMap()).toList());
     await prefs.setString('shortcuts', encoded);
   }
@@ -83,6 +94,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     final ip = ipAddr ?? _ipController.text.trim();
     if (ip.isEmpty) return;
 
+    // Connect UDP for Stylus Data
     _client?.dispose();
     _client = UdpClient(targetIp: ip);
     await _client?.connect();
@@ -93,10 +105,83 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     });
 
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
+    // Connect WebRTC if enabled
+    if (_mirrorScreen) {
+      _startWebRtcSignaling(ip);
+    }
+  }
+
+  Future<void> _startWebRtcSignaling(String targetIp) async {
+    _signaler = WebRtcSignaler(
+      port: 4001,
+      onMessage: _handleSignalingMessage,
+      onDisconnect: _closeWebRtc,
+    );
+    await _signaler!.connect(targetIp);
+  }
+
+  void _handleSignalingMessage(Map<String, dynamic> message) async {
+    final type = message['type'];
+    
+    if (type == 'offer') {
+      final configuration = {
+        "iceServers": []
+      };
+      
+      _peerConnection = await createPeerConnection(configuration);
+
+      _peerConnection!.onIceCandidate = (candidate) {
+        _signaler?.sendMessage({
+          'type': 'candidate',
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        });
+      };
+
+      _peerConnection!.onAddStream = (stream) {
+        _remoteRenderer.srcObject = stream;
+        setState(() {}); // trigger rebuild to show video
+      };
+
+      _peerConnection!.onTrack = (event) {
+        if (event.track.kind == 'video') {
+          _remoteRenderer.srcObject = event.streams[0];
+          setState(() {});
+        }
+      };
+
+      await _peerConnection!.setRemoteDescription(
+        RTCSessionDescription(message['sdp'], type),
+      );
+
+      final answer = await _peerConnection!.createAnswer();
+      await _peerConnection!.setLocalDescription(answer);
+
+      _signaler?.sendMessage({
+        'type': 'answer',
+        'sdp': answer.sdp,
+      });
+
+    } else if (type == 'candidate' && _peerConnection != null) {
+      await _peerConnection!.addCandidate(
+        RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']),
+      );
+    }
+  }
+
+  void _closeWebRtc() {
+    _peerConnection?.close();
+    _peerConnection = null;
+    _signaler?.stop();
+    _signaler = null;
+    _remoteRenderer.srcObject = null;
   }
 
   void _disconnect() {
     _client?.dispose();
+    _closeWebRtc();
     setState(() {
       _isConnected = false;
     });
@@ -151,7 +236,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
   void _addNewShortcut() {
     String label = "";
-    int vkCode = 65; // Default 'A'
+    int vkCode = 65;
     bool ctrl = false;
     bool shift = false;
     bool alt = false;
@@ -231,14 +316,27 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
         color: Colors.black,
         child: LayoutBuilder(
           builder: (context, constraints) {
-            return Listener(
-              onPointerDown: (e) => _handlePointerEvent(e, constraints),
-              onPointerMove: (e) => _handlePointerEvent(e, constraints),
-              onPointerUp: (e) => _handlePointerEvent(e, constraints),
-              onPointerCancel: (e) => _handlePointerEvent(e, constraints),
-              onPointerHover: (e) => _handlePointerEvent(e, constraints),
-              behavior: HitTestBehavior.opaque,
-              child: const SizedBox.expand(),
+            return Stack(
+              children: [
+                if (_mirrorScreen && _remoteRenderer.srcObject != null)
+                  Positioned.fill(
+                    child: RTCVideoView(
+                      _remoteRenderer,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    ),
+                  ),
+                Positioned.fill(
+                  child: Listener(
+                    onPointerDown: (e) => _handlePointerEvent(e, constraints),
+                    onPointerMove: (e) => _handlePointerEvent(e, constraints),
+                    onPointerUp: (e) => _handlePointerEvent(e, constraints),
+                    onPointerCancel: (e) => _handlePointerEvent(e, constraints),
+                    onPointerHover: (e) => _handlePointerEvent(e, constraints),
+                    behavior: HitTestBehavior.opaque,
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ],
             );
           },
         ),
@@ -314,6 +412,8 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   void dispose() {
     _client?.dispose();
     _ipController.dispose();
+    _remoteRenderer.dispose();
+    _closeWebRtc();
     super.dispose();
   }
 
@@ -396,7 +496,18 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 30),
+              const SizedBox(height: 20),
+              SwitchListTile(
+                title: const Text('Mirror PC Screen', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Shows desktop behind canvas (WebRTC)', style: TextStyle(color: Colors.white54)),
+                value: _mirrorScreen,
+                activeColor: Colors.blueAccent,
+                onChanged: (val) {
+                  setState(() => _mirrorScreen = val);
+                  _savePrefs();
+                },
+              ),
+              const SizedBox(height: 20),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [

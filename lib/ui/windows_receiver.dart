@@ -2,8 +2,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../core/network/udp_server.dart';
 import '../core/network/stylus_event.dart';
+import '../core/network/webrtc_signaler.dart';
 
 class WindowsReceiverScreen extends StatefulWidget {
   const WindowsReceiverScreen({super.key});
@@ -16,6 +18,12 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   final UdpServer _server = UdpServer();
   static const MethodChannel _channel = MethodChannel('com.virtualstylus/pen');
   String _localIp = 'Loading...';
+
+  // WebRTC
+  bool _enableScreenMirroring = false;
+  WebRtcSignaler? _signaler;
+  RTCPeerConnection? _peerConnection;
+  MediaStream? _localStream;
 
   @override
   void initState() {
@@ -64,8 +72,109 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     }
   }
 
+  void _toggleScreenMirroring(bool value) {
+    setState(() {
+      _enableScreenMirroring = value;
+    });
+
+    if (value) {
+      _startSignalingServer();
+    } else {
+      _stopSignalingServer();
+    }
+  }
+
+  Future<void> _startSignalingServer() async {
+    _signaler = WebRtcSignaler(
+      port: 4001,
+      onConnect: () => _setupWebRtcAndSendOffer(),
+      onDisconnect: () => _closeWebRtc(),
+      onMessage: _handleSignalingMessage,
+    );
+    await _signaler!.startServer();
+  }
+
+  void _stopSignalingServer() {
+    _signaler?.stop();
+    _signaler = null;
+    _closeWebRtc();
+  }
+
+  Future<void> _setupWebRtcAndSendOffer() async {
+    final configuration = {
+      "iceServers": [] // P2P local network, no stun needed
+    };
+
+    _peerConnection = await createPeerConnection(configuration);
+
+    _peerConnection!.onIceCandidate = (candidate) {
+      _signaler?.sendMessage({
+        'type': 'candidate',
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      });
+    };
+
+    // Get screen stream
+    try {
+      final sources = await desktopCapturer.getSources(types: [SourceType.Screen]);
+      if (sources.isNotEmpty) {
+        final source = sources.first; // primary monitor
+        final mediaConstraints = <String, dynamic>{
+          'audio': false,
+          'video': {
+            'mandatory': {
+              'chromeMediaSource': 'desktop',
+              'chromeMediaSourceId': source.id,
+            }
+          }
+        };
+        _localStream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
+        
+        _localStream!.getTracks().forEach((track) {
+          _peerConnection!.addTrack(track, _localStream!);
+        });
+
+        RTCSessionDescription offer = await _peerConnection!.createOffer();
+        await _peerConnection!.setLocalDescription(offer);
+
+        _signaler?.sendMessage({
+          'type': 'offer',
+          'sdp': offer.sdp,
+        });
+      }
+    } catch (e) {
+      debugPrint("Error capturing screen: $e");
+    }
+  }
+
+  void _handleSignalingMessage(Map<String, dynamic> message) async {
+    if (_peerConnection == null) return;
+
+    final type = message['type'];
+    if (type == 'answer') {
+      await _peerConnection!.setRemoteDescription(
+        RTCSessionDescription(message['sdp'], type),
+      );
+    } else if (type == 'candidate') {
+      await _peerConnection!.addCandidate(
+        RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']),
+      );
+    }
+  }
+
+  void _closeWebRtc() {
+    _localStream?.getTracks().forEach((track) => track.stop());
+    _localStream?.dispose();
+    _localStream = null;
+    _peerConnection?.close();
+    _peerConnection = null;
+  }
+
   @override
   void dispose() {
+    _stopSignalingServer();
     _server.stop();
     super.dispose();
   }
@@ -117,8 +226,23 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                 ),
               ),
             const SizedBox(height: 30),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Switch(
+                  value: _enableScreenMirroring,
+                  onChanged: _toggleScreenMirroring,
+                  activeColor: Colors.blueAccent,
+                ),
+                const Text(
+                  'Enable Screen Mirroring (WebRTC)',
+                  style: TextStyle(color: Colors.white, fontSize: 18),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
             const Text(
-              'Listening on Port: 4000',
+              'Listening on Port: 4000 (UDP), 4001 (TCP)',
               style: TextStyle(color: Colors.white54, fontSize: 16),
             ),
           ],
