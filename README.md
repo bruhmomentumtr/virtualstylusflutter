@@ -10,7 +10,7 @@ VirtualStylus utilizes high-speed UDP for sub-millisecond drawing transmission, 
 - **WebRTC Screen Mirroring**: View your Windows desktop directly on your tablet canvas in real-time.
 - **1:1 Canvas Mapping**: Intelligent mathematical aspect-ratio mapping ensures your pen strokes are 100% accurate, completely neutralizing letterboxing or resolution differences.
 - **Dynamic Virtual Keyboard Sidebar**: A customizable, frosted-glass sidebar lets you create and save specific keyboard shortcuts (like `Ctrl + Z`, `Shift + B`) right next to your canvas.
-- **Premium Glassmorphism UI**: Beautiful, modern dark-mode aesthetics with blurred backdrops, neon gradients, and micro-animations.
+- **Premium Glassmorphism UI & Material You Icons**: Beautiful, modern dark-mode aesthetics with blurred backdrops, neon gradients, and micro-animations. Includes full support for Android 13+ Monochrome Themed Icons (Material You).
 - **Robust Connection Security**: Features a persistent TCP handshake and an aggressive **IP-Locking Firewall**. Once connected, it blocks all other devices on the network to prevent cursor interference.
 - **Pressure Sensitivity**: Fully supports stylus pressure data for professional digital art software (Photoshop, Illustrator, Krita, etc.).
 
