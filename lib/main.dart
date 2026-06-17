@@ -1,16 +1,10 @@
 import 'package:flutter/material.dart';
 import 'dart:io';
-import 'ui/mode_selection.dart';
-import 'native/windows_input.dart';
+import 'ui/android_transmitter.dart';
+import 'ui/windows_receiver.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Yerleşik Kütüphane Yüklemeleri (Windows Cihazlar için)
-  if (Platform.isWindows) {
-    WindowsInput.init();
-  }
-
   runApp(const VirtualStylusApp());
 }
 
@@ -20,12 +14,30 @@ class VirtualStylusApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Virtual Stylus',
+      title: 'VirtualStylus',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueAccent),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blueAccent,
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
       ),
-      home: const ModeSelectionScreen(),
+      home: _getHomeScreen(),
     );
+  }
+
+  Widget _getHomeScreen() {
+    if (Platform.isWindows) {
+      return const WindowsReceiverScreen();
+    } else if (Platform.isAndroid) {
+      return const AndroidTransmitterScreen();
+    } else {
+      return const Scaffold(
+        body: Center(
+          child: Text('Unsupported Platform. Please run on Windows or Android.'),
+        ),
+      );
+    }
   }
 }
