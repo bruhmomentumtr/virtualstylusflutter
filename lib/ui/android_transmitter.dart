@@ -128,10 +128,16 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     await _signaler!.connect(targetIp);
   }
 
+  List<RTCIceCandidate> _remoteCandidates = [];
+  bool _isRemoteSet = false;
+
   void _handleSignalingMessage(Map<String, dynamic> message) async {
     final type = message['type'];
     
     if (type == 'offer') {
+      _isRemoteSet = false;
+      _remoteCandidates.clear();
+
       final configuration = {
         "iceServers": []
       };
@@ -162,6 +168,12 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(message['sdp'], type),
       );
+      
+      _isRemoteSet = true;
+      for (var cand in _remoteCandidates) {
+        await _peerConnection!.addCandidate(cand);
+      }
+      _remoteCandidates.clear();
 
       final answer = await _peerConnection!.createAnswer();
       await _peerConnection!.setLocalDescription(answer);
@@ -171,10 +183,13 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
         'sdp': answer.sdp,
       });
 
-    } else if (type == 'candidate' && _peerConnection != null) {
-      await _peerConnection!.addCandidate(
-        RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']),
-      );
+    } else if (type == 'candidate') {
+      final cand = RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']);
+      if (_isRemoteSet && _peerConnection != null) {
+        await _peerConnection!.addCandidate(cand);
+      } else {
+        _remoteCandidates.add(cand);
+      }
     }
   }
 

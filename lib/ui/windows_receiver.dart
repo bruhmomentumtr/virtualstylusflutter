@@ -101,6 +101,9 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   }
 
   Future<void> _setupWebRtcAndSendOffer() async {
+    _isRemoteSet = false;
+    _remoteCandidates.clear();
+    
     final configuration = {
       "iceServers": [] // P2P local network, no stun needed
     };
@@ -149,6 +152,9 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     }
   }
 
+  List<RTCIceCandidate> _remoteCandidates = [];
+  bool _isRemoteSet = false;
+
   void _handleSignalingMessage(Map<String, dynamic> message) async {
     if (_peerConnection == null) return;
 
@@ -157,10 +163,18 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(message['sdp'], type),
       );
+      _isRemoteSet = true;
+      for (var cand in _remoteCandidates) {
+        await _peerConnection!.addCandidate(cand);
+      }
+      _remoteCandidates.clear();
     } else if (type == 'candidate') {
-      await _peerConnection!.addCandidate(
-        RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']),
-      );
+      final cand = RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']);
+      if (_isRemoteSet) {
+        await _peerConnection!.addCandidate(cand);
+      } else {
+        _remoteCandidates.add(cand);
+      }
     }
   }
 

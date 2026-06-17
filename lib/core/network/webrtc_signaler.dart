@@ -50,17 +50,23 @@ class WebRtcSignaler {
     }
   }
 
+  String _buffer = '';
+
   void _listenToSocket() {
     _socket!.listen(
       (data) {
         try {
-          final str = utf8.decode(data);
-          // Handle potential concatenated messages (JSON streams)
-          final messages = str.split('\n').where((s) => s.trim().isNotEmpty);
-          for (var msgStr in messages) {
-            final msg = jsonDecode(msgStr);
-            if (onMessage != null) {
-              onMessage!(msg);
+          _buffer += utf8.decode(data);
+          while (_buffer.contains('\n')) {
+            final index = _buffer.indexOf('\n');
+            final msgStr = _buffer.substring(0, index).trim();
+            _buffer = _buffer.substring(index + 1);
+            
+            if (msgStr.isNotEmpty) {
+              final msg = jsonDecode(msgStr);
+              if (onMessage != null) {
+                onMessage!(msg);
+              }
             }
           }
         } catch (e) {
