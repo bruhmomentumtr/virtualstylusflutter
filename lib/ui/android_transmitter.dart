@@ -213,8 +213,35 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   void _handlePointerEvent(PointerEvent event, BoxConstraints constraints) {
     if (_client == null) return;
 
-    final x = (event.localPosition.dx / constraints.maxWidth).clamp(0.0, 1.0);
-    final y = (event.localPosition.dy / constraints.maxHeight).clamp(0.0, 1.0);
+    double videoWidth = 16.0;
+    double videoHeight = 9.0;
+    if (_remoteRenderer.value.width > 0 && _remoteRenderer.value.height > 0) {
+      videoWidth = _remoteRenderer.value.width.toDouble();
+      videoHeight = _remoteRenderer.value.height.toDouble();
+    }
+
+    final screenWidth = constraints.maxWidth;
+    final screenHeight = constraints.maxHeight;
+
+    final videoRatio = videoWidth / videoHeight;
+    final screenRatio = screenWidth / screenHeight;
+
+    double drawnWidth;
+    double drawnHeight;
+
+    if (videoRatio > screenRatio) {
+      drawnWidth = screenWidth;
+      drawnHeight = screenWidth / videoRatio;
+    } else {
+      drawnHeight = screenHeight;
+      drawnWidth = screenHeight * videoRatio;
+    }
+
+    final xOffset = (screenWidth - drawnWidth) / 2.0;
+    final yOffset = (screenHeight - drawnHeight) / 2.0;
+
+    final x = ((event.localPosition.dx - xOffset) / drawnWidth).clamp(0.0, 1.0);
+    final y = ((event.localPosition.dy - yOffset) / drawnHeight).clamp(0.0, 1.0);
 
     EventAction action = EventAction.move;
     if (event is PointerDownEvent) {
@@ -336,45 +363,31 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       flex: 92,
       child: Container(
         color: Colors.black,
-        child: Center(
-          child: ValueListenableBuilder<RTCVideoValue>(
-            valueListenable: _remoteRenderer,
-            builder: (context, value, child) {
-              double aspectRatio = 16.0 / 9.0;
-              if (value.width > 0 && value.height > 0) {
-                aspectRatio = value.aspectRatio;
-              }
-              return AspectRatio(
-                aspectRatio: aspectRatio,
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    return Stack(
-                      children: [
-                        if (_mirrorScreen && _remoteRenderer.srcObject != null)
-                          Positioned.fill(
-                            child: RTCVideoView(
-                              _remoteRenderer,
-                              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                            ),
-                          ),
-                        Positioned.fill(
-                          child: Listener(
-                            onPointerDown: (e) => _handlePointerEvent(e, constraints),
-                            onPointerMove: (e) => _handlePointerEvent(e, constraints),
-                            onPointerUp: (e) => _handlePointerEvent(e, constraints),
-                            onPointerCancel: (e) => _handlePointerEvent(e, constraints),
-                            onPointerHover: (e) => _handlePointerEvent(e, constraints),
-                            behavior: HitTestBehavior.opaque,
-                            child: const SizedBox.expand(),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return Stack(
+              children: [
+                if (_mirrorScreen && _remoteRenderer.srcObject != null)
+                  Positioned.fill(
+                    child: RTCVideoView(
+                      _remoteRenderer,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    ),
+                  ),
+                Positioned.fill(
+                  child: Listener(
+                    onPointerDown: (e) => _handlePointerEvent(e, constraints),
+                    onPointerMove: (e) => _handlePointerEvent(e, constraints),
+                    onPointerUp: (e) => _handlePointerEvent(e, constraints),
+                    onPointerCancel: (e) => _handlePointerEvent(e, constraints),
+                    onPointerHover: (e) => _handlePointerEvent(e, constraints),
+                    behavior: HitTestBehavior.opaque,
+                    child: const SizedBox.expand(),
+                  ),
                 ),
-              );
-            },
-          ),
+              ],
+            );
+          },
         ),
       ),
     );
