@@ -29,12 +29,19 @@ class ShortcutItem {
         'modifiers': modifiers,
       };
 
-  factory ShortcutItem.fromMap(Map<String, dynamic> map) => ShortcutItem(
-        label: map['label'],
-        icon: IconData(map['icon'], fontFamily: 'MaterialIcons'),
-        vkCode: map['vkCode'],
-        modifiers: map['modifiers'],
-      );
+  factory ShortcutItem.fromMap(Map<String, dynamic> map) {
+    int code = map['icon'];
+    IconData iconData = Icons.keyboard;
+    if (code == Icons.undo.codePoint) iconData = Icons.undo;
+    if (code == Icons.redo.codePoint) iconData = Icons.redo;
+
+    return ShortcutItem(
+      label: map['label'],
+      icon: iconData,
+      vkCode: map['vkCode'],
+      modifiers: map['modifiers'],
+    );
+  }
 }
 
 class AndroidTransmitterScreen extends StatefulWidget {

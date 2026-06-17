@@ -19,11 +19,11 @@ jobs:
           channel: 'stable'
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --debug
+      - run: flutter build apk --release --split-per-abi --obfuscate --split-debug-info=build/app/outputs/symbols
       - uses: actions/upload-artifact@v4
         with:
-          name: android-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: android-release-apks
+          path: build/app/outputs/flutter-apk/app-*-release.apk
 
   build_windows:
     name: Build Windows App
