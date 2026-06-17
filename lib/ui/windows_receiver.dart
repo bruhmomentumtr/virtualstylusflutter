@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -194,73 +195,137 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     super.dispose();
   }
 
+  Widget _buildGlassCard({required Widget child, EdgeInsetsGeometry? padding}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(24),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          padding: padding ?? const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withOpacity(0.1)),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 30, offset: const Offset(0, 10))
+            ],
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900],
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.wifi_tethering, size: 80, color: Colors.blueAccent),
-            const SizedBox(height: 20),
-            const Text(
-              'VirtualStylus Receiver',
-              style: TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Scan QR or Enter IP in Android App:',
-              style: TextStyle(color: Colors.white70, fontSize: 18),
-            ),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.blueAccent, width: 2),
-              ),
-              child: Text(
-                _localIp,
-                style: const TextStyle(color: Colors.greenAccent, fontSize: 36, fontWeight: FontWeight.bold, letterSpacing: 2),
-              ),
-            ),
-            const SizedBox(height: 30),
-            if (_localIp.contains('.'))
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: QrImageView(
-                  data: _localIp,
-                  version: QrVersions.auto,
-                  size: 200.0,
-                ),
-              ),
-            const SizedBox(height: 30),
-            Row(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF0F172A), Color(0xFF1E1B4B), Color(0xFF000000)],
+          ),
+        ),
+        child: Center(
+          child: SingleChildScrollView(
+            child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Switch(
-                  value: _enableScreenMirroring,
-                  onChanged: _toggleScreenMirroring,
-                  activeColor: Colors.blueAccent,
+                _buildGlassCard(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.blueAccent.withOpacity(0.1),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.wifi_tethering, size: 64, color: Colors.blueAccent),
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'VirtualStylus',
+                        style: TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Server is running and ready to connect',
+                        style: TextStyle(color: Colors.white60, fontSize: 16),
+                      ),
+                      const SizedBox(height: 32),
+                      
+                      // IP Display
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.3),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.blueAccent.withOpacity(0.3), width: 1),
+                        ),
+                        child: Column(
+                          children: [
+                            const Text('LOCAL IP ADDRESS', style: TextStyle(color: Colors.blueAccent, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 2)),
+                            const SizedBox(height: 8),
+                            Text(
+                              _localIp,
+                              style: const TextStyle(color: Colors.white, fontSize: 42, fontWeight: FontWeight.w300, letterSpacing: 3),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+
+                      if (_localIp.contains('.'))
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(color: Colors.blueAccent.withOpacity(0.2), blurRadius: 20, spreadRadius: 5)
+                            ],
+                          ),
+                          child: QrImageView(
+                            data: _localIp,
+                            version: QrVersions.auto,
+                            size: 180.0,
+                            eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.square, color: Colors.black87),
+                            dataModuleStyle: const QrDataModuleStyle(dataModuleShape: QrDataModuleShape.circle, color: Colors.black87),
+                          ),
+                        ),
+                      
+                      const SizedBox(height: 32),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Switch(
+                            value: _enableScreenMirroring,
+                            onChanged: _toggleScreenMirroring,
+                            activeColor: Colors.blueAccent,
+                            activeTrackColor: Colors.blueAccent.withOpacity(0.3),
+                            inactiveThumbColor: Colors.white54,
+                            inactiveTrackColor: Colors.black45,
+                          ),
+                          const SizedBox(width: 12),
+                          const Text(
+                            'Screen Mirroring (WebRTC)',
+                            style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
+                const SizedBox(height: 32),
                 const Text(
-                  'Enable Screen Mirroring (WebRTC)',
-                  style: TextStyle(color: Colors.white, fontSize: 18),
+                  'Listening on UDP 4000 • TCP 4001',
+                  style: TextStyle(color: Colors.white30, fontSize: 12, letterSpacing: 1),
                 ),
               ],
             ),
-            const SizedBox(height: 10),
-            const Text(
-              'Listening on Port: 4000 (UDP), 4001 (TCP)',
-              style: TextStyle(color: Colors.white54, fontSize: 16),
-            ),
-          ],
+          ),
         ),
       ),
     );

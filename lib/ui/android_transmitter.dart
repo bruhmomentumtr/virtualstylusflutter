@@ -393,65 +393,114 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     );
   }
 
+  Widget _buildGlassCard({required Widget child, EdgeInsetsGeometry? padding}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(24),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          padding: padding ?? const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withOpacity(0.1)),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 30, offset: const Offset(0, 10))
+            ],
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
   Widget _buildSidebar() {
     return Expanded(
       flex: 8,
-      child: Container(
-        color: Colors.grey[900],
-        child: Column(
-          children: [
-            const SizedBox(height: 10),
-            IconButton(
-              icon: const Icon(Icons.close, color: Colors.redAccent),
-              onPressed: _disconnect,
+      child: ClipRRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              border: Border(
+                right: _shortcutsOnLeft ? BorderSide(color: Colors.white.withOpacity(0.1)) : BorderSide.none,
+                left: !_shortcutsOnLeft ? BorderSide(color: Colors.white.withOpacity(0.1)) : BorderSide.none,
+              )
             ),
-            const Divider(color: Colors.white24),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _shortcuts.length,
-                itemBuilder: (context, index) {
-                  final s = _shortcuts[index];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-                    child: InkWell(
-                      onLongPress: () {
-                        setState(() {
-                          _shortcuts.removeAt(index);
-                          _savePrefs();
-                        });
-                      },
-                      child: Tooltip(
-                        message: "Hold to delete",
-                        child: FloatingActionButton(
-                          heroTag: 'shortcut_$index',
-                          mini: true,
-                          backgroundColor: Colors.white24,
-                          elevation: 0,
-                          onPressed: () => _sendShortcut(s),
-                          child: Text(s.label.substring(0, 1).toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            child: Column(
+              children: [
+                const SizedBox(height: 10),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.redAccent, size: 28),
+                  onPressed: _disconnect,
+                  tooltip: 'Disconnect',
+                ),
+                Divider(color: Colors.white.withOpacity(0.1), height: 30),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _shortcuts.length,
+                    itemBuilder: (context, index) {
+                      final s = _shortcuts[index];
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                        child: InkWell(
+                          onLongPress: () {
+                            setState(() {
+                              _shortcuts.removeAt(index);
+                              _savePrefs();
+                            });
+                          },
+                          borderRadius: BorderRadius.circular(12),
+                          child: Tooltip(
+                            message: "Hold to delete",
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.white.withOpacity(0.05)),
+                              ),
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(s.icon, color: Colors.white70, size: 24),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    s.label, 
+                                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                                    textAlign: TextAlign.center,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  );
-                },
-              ),
+                      );
+                    },
+                  ),
+                ),
+                Divider(color: Colors.white.withOpacity(0.1), height: 20),
+                IconButton(
+                  icon: const Icon(Icons.add_circle, color: Colors.blueAccent, size: 32),
+                  onPressed: _addNewShortcut,
+                  tooltip: 'Add Shortcut',
+                ),
+                const SizedBox(height: 10),
+                IconButton(
+                  icon: Icon(Icons.swap_horiz, color: Colors.white.withOpacity(0.5)),
+                  onPressed: () {
+                    setState(() {
+                      _shortcutsOnLeft = !_shortcutsOnLeft;
+                      _savePrefs();
+                    });
+                  },
+                ),
+                const SizedBox(height: 20),
+              ],
             ),
-            const Divider(color: Colors.white24),
-            IconButton(
-              icon: const Icon(Icons.add, color: Colors.blueAccent),
-              onPressed: _addNewShortcut,
-            ),
-            IconButton(
-              icon: const Icon(Icons.swap_horiz, color: Colors.white54),
-              onPressed: () {
-                setState(() {
-                  _shortcutsOnLeft = !_shortcutsOnLeft;
-                  _savePrefs();
-                });
-              },
-            ),
-            const SizedBox(height: 10),
-          ],
+          ),
         ),
       ),
     );
@@ -515,75 +564,120 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     }
 
     return Scaffold(
-      backgroundColor: Colors.grey[900],
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.edit, size: 80, color: Colors.blueAccent),
-              const SizedBox(height: 20),
-              const Text(
-                'VirtualStylus',
-                style: TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 40),
-              TextField(
-                controller: _ipController,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                style: const TextStyle(color: Colors.white, fontSize: 24),
-                textAlign: TextAlign.center,
-                decoration: InputDecoration(
-                  hintText: 'Enter PC IP Address',
-                  hintStyle: const TextStyle(color: Colors.white30),
-                  filled: true,
-                  fillColor: Colors.black54,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              SwitchListTile(
-                title: const Text('Mirror PC Screen', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Shows desktop behind canvas (WebRTC)', style: TextStyle(color: Colors.white54)),
-                value: _mirrorScreen,
-                activeColor: Colors.blueAccent,
-                onChanged: (val) {
-                  setState(() => _mirrorScreen = val);
-                  _savePrefs();
-                },
-              ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF0F172A), Color(0xFF1E1B4B), Color(0xFF000000)],
+          ),
+        ),
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(32.0),
+            child: _buildGlassCard(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  ElevatedButton.icon(
-                    onPressed: _connect,
-                    icon: const Icon(Icons.wifi, color: Colors.white),
-                    label: const Text('Connect', style: TextStyle(fontSize: 18, color: Colors.white)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blueAccent,
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.blueAccent.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.edit, size: 64, color: Colors.blueAccent),
+                  ),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'VirtualStylus',
+                    style: TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                  ),
+                  const SizedBox(height: 40),
+                  SizedBox(
+                    width: 350,
+                    child: TextField(
+                      controller: _ipController,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      style: const TextStyle(color: Colors.white, fontSize: 24, letterSpacing: 2),
+                      textAlign: TextAlign.center,
+                      decoration: InputDecoration(
+                        hintText: 'Enter PC IP Address',
+                        hintStyle: TextStyle(color: Colors.white.withOpacity(0.3), letterSpacing: 0),
+                        filled: true,
+                        fillColor: Colors.black.withOpacity(0.4),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: Colors.blueAccent),
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  ElevatedButton.icon(
-                    onPressed: () => setState(() => _isScanning = true),
-                    icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
-                    label: const Text('Scan QR', style: TextStyle(fontSize: 18, color: Colors.white)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  const SizedBox(height: 32),
+                  SizedBox(
+                    width: 350,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.03),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white.withOpacity(0.05)),
+                      ),
+                      child: SwitchListTile(
+                        title: const Text('Mirror PC Screen', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w500)),
+                        subtitle: const Text('WebRTC Video Stream', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                        value: _mirrorScreen,
+                        activeColor: Colors.blueAccent,
+                        activeTrackColor: Colors.blueAccent.withOpacity(0.3),
+                        inactiveThumbColor: Colors.white54,
+                        inactiveTrackColor: Colors.black45,
+                        onChanged: (val) {
+                          setState(() => _mirrorScreen = val);
+                          _savePrefs();
+                        },
+                      ),
                     ),
+                  ),
+                  const SizedBox(height: 40),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _connect,
+                        icon: const Icon(Icons.wifi, color: Colors.white),
+                        label: const Text('Connect', style: TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueAccent,
+                          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: 10,
+                          shadowColor: Colors.blueAccent.withOpacity(0.5),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      ElevatedButton.icon(
+                        onPressed: () => setState(() => _isScanning = true),
+                        icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
+                        label: const Text('Scan QR', style: TextStyle(fontSize: 18, color: Colors.white)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white.withOpacity(0.1),
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: 0,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
+            ),
           ),
         ),
       ),
