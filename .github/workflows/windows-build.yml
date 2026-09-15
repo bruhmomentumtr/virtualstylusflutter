@@ -58,6 +58,10 @@ jobs:
           #   3. Pre-extract so the plugin's CMakeLists.txt sees the
           #      extracted LICENSE file and skips file(ARCHIVE_EXTRACT)
           #      entirely — libarchive is never invoked.
+          #
+          # Note: cygpath in Git Bash does NOT follow Windows symlinks, so
+          # we cannot use it to resolve the .plugin_symlinks target. Instead
+          # we look up the package source directly in PUB_CACHE.
 
           WEBRTC_SYMLINK="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
 
@@ -66,19 +70,33 @@ jobs:
             exit 0
           fi
 
-          if [ -L "$WEBRTC_SYMLINK" ]; then
-            WEBRTC_TARGET=$(cygpath -wa "$WEBRTC_SYMLINK")
-            echo "Replacing symlink with real copy from $WEBRTC_TARGET"
-            rm "$WEBRTC_SYMLINK"
-            mkdir -p "$WEBRTC_SYMLINK"
-            # robocopy exit codes 0-7 are success; 8+ indicate real failure.
-            robocopy "$WEBRTC_TARGET" "$WEBRTC_SYMLINK" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 > /dev/null
-            if [ $? -ge 8 ]; then
-              echo "::error::robocopy failed while copying $WEBRTC_TARGET"
-              exit 1
-            fi
-          else
-            echo "Plugin path is already a real directory; no symlink swap needed"
+          # Resolve the plugin source from the pub cache (the canonical
+          # location that the .plugin_symlinks/ symlink points at).
+          PUB_CACHE_UNIX=$(cygpath -u "$PUB_CACHE")
+          WEBRTC_PKG=$(find "$PUB_CACHE_UNIX/hosted/pub.dev" -maxdepth 2 -type d -name "flutter_webrtc-*" 2>/dev/null | head -1)
+
+          if [ -z "$WEBRTC_PKG" ]; then
+            echo "::error::Could not locate flutter_webrtc package in $PUB_CACHE_UNIX/hosted/pub.dev"
+            exit 1
+          fi
+
+          WEBRTC_TARGET="${WEBRTC_PKG}/windows"
+          echo "flutter_webrtc package source: $WEBRTC_TARGET"
+
+          if [ ! -d "$WEBRTC_TARGET" ]; then
+            echo "::error::Plugin source dir not found at $WEBRTC_TARGET"
+            exit 1
+          fi
+
+          # Replace the symlink with a real copy.
+          rm "$WEBRTC_SYMLINK"
+          mkdir -p "$WEBRTC_SYMLINK"
+          # robocopy exit codes 0-7 are success; 8+ indicate real failure.
+          robocopy "$WEBRTC_TARGET" "$WEBRTC_SYMLINK" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 > /dev/null
+          ROBO_EXIT=$?
+          if [ "$ROBO_EXIT" -ge 8 ]; then
+            echo "::error::robocopy failed with exit $ROBO_EXIT"
+            exit 1
           fi
 
           WEBRTC_DIR="$WEBRTC_SYMLINK/third_party"
