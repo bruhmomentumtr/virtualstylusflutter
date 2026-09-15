@@ -6,8 +6,9 @@ name: Flutter Windows Build (Fixed)
 # write through a symlink into the read-only pub cache). This workflow
 # contains a corrected version that:
 #   1. Replaces the .plugin_symlinks/flutter_webrtc/ symlink with a real
-#      directory copy (via robocopy) so all subsequent writes land in
-#      our project tree instead of the pub cache.
+#      directory copy of the plugin source (looked up in PUB_CACHE, copied
+#      via cp -r to avoid MSYS path-translation quirks) so all subsequent
+#      writes land in our project tree instead of the pub cache.
 #   2. Pre-downloads the libwebrtc archive under the EXACT filename the
 #      plugin's CMakeLists.txt expects, so CMake's own file(DOWNLOAD)
 #      becomes a no-op.
@@ -89,13 +90,18 @@ jobs:
           fi
 
           # Replace the symlink with a real copy.
-          rm "$WEBRTC_SYMLINK"
+          # Use rm -rf because the symlink resolves to a directory, and
+          # use cp -r (Git Bash native) rather than robocopy to avoid
+          # MSYS path-translation quirks that confuse native Windows tools.
+          echo "Removing symlink at $WEBRTC_SYMLINK"
+          rm -rf "$WEBRTC_SYMLINK"
           mkdir -p "$WEBRTC_SYMLINK"
-          # robocopy exit codes 0-7 are success; 8+ indicate real failure.
-          robocopy "$WEBRTC_TARGET" "$WEBRTC_SYMLINK" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 > /dev/null
-          ROBO_EXIT=$?
-          if [ "$ROBO_EXIT" -ge 8 ]; then
-            echo "::error::robocopy failed with exit $ROBO_EXIT"
+          echo "Copying plugin source from $WEBRTC_TARGET to $WEBRTC_SYMLINK"
+          cp -r "$WEBRTC_TARGET/." "$WEBRTC_SYMLINK/"
+          echo "Plugin source copied; verifying"
+          if [ ! -f "$WEBRTC_SYMLINK/CMakeLists.txt" ]; then
+            echo "::error::Copy did not produce CMakeLists.txt in plugin source"
+            ls -la "$WEBRTC_SYMLINK" || true
             exit 1
           fi
 
