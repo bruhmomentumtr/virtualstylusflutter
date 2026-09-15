@@ -1,0 +1,105 @@
+name: Flutter Windows Build (Fixed)
+
+# Parallel workflow to .github/workflows/build.yml. The original build.yml
+# has a broken workaround for the flutter_webrtc CMake symlink extraction
+# bug (saves the libwebrtc zip under the wrong filename, and tries to
+# write through a symlink into the read-only pub cache). This workflow
+# contains a corrected version that:
+#   1. Replaces the .plugin_symlinks/flutter_webrtc/ symlink with a real
+#      directory copy (via robocopy) so all subsequent writes land in
+#      our project tree instead of the pub cache.
+#   2. Pre-downloads the libwebrtc archive under the EXACT filename the
+#      plugin's CMakeLists.txt expects, so CMake's own file(DOWNLOAD)
+#      becomes a no-op.
+#   3. Pre-extracts the archive so CMake's LICENSE-existence check
+#      passes and file(ARCHIVE_EXTRACT) is skipped entirely — libarchive
+#      is never invoked, sidestepping the original error.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build_windows:
+    name: Build Windows App
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+      - run: flutter pub get
+      - name: Workaround for flutter_webrtc extraction bug on Windows
+        shell: bash
+        run: |
+          set -e
+
+          # flutter_webrtc's CMakeLists.txt downloads and extracts a ~150MB
+          # libwebrtc archive via file(ARCHIVE_EXTRACT). On Windows this fails
+          # with "Cannot extract through symlink" because the plugin lives at
+          # windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/, which
+          # is a Windows symlink to the pub cache. libarchive refuses to
+          # write through such symlinks, and even pre-extracting into the
+          # symlinked path is unreliable (read-only pub-cache files fail
+          # silently).
+          #
+          # Fix:
+          #   1. Replace the symlink with a real directory copy of the
+          #      plugin's `windows/` contents (robocopy handles long paths
+          #      and read-only source files reliably on Windows).
+          #   2. Pre-download the archive under the EXACT filename CMake
+          #      expects so its own file(DOWNLOAD) becomes a no-op.
+          #   3. Pre-extract so the plugin's CMakeLists.txt sees the
+          #      extracted LICENSE file and skips file(ARCHIVE_EXTRACT)
+          #      entirely — libarchive is never invoked.
+
+          WEBRTC_SYMLINK="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
+
+          if [ ! -e "$WEBRTC_SYMLINK" ]; then
+            echo "::warning::flutter_webrtc plugin not found at $WEBRTC_SYMLINK; skipping workaround"
+            exit 0
+          fi
+
+          if [ -L "$WEBRTC_SYMLINK" ]; then
+            WEBRTC_TARGET=$(cygpath -wa "$WEBRTC_SYMLINK")
+            echo "Replacing symlink with real copy from $WEBRTC_TARGET"
+            rm "$WEBRTC_SYMLINK"
+            mkdir -p "$WEBRTC_SYMLINK"
+            # robocopy exit codes 0-7 are success; 8+ indicate real failure.
+            robocopy "$WEBRTC_TARGET" "$WEBRTC_SYMLINK" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 > /dev/null
+            if [ $? -ge 8 ]; then
+              echo "::error::robocopy failed while copying $WEBRTC_TARGET"
+              exit 1
+            fi
+          else
+            echo "Plugin path is already a real directory; no symlink swap needed"
+          fi
+
+          WEBRTC_DIR="$WEBRTC_SYMLINK/third_party"
+          WEBRTC_VERSION="libwebrtc.m144.7559.09"
+          WEBRTC_URL="https://github.com/webrtc-sdk/libwebrtc/releases/download/${WEBRTC_VERSION}/libwebrtc-win-x64-release.zip"
+          WEBRTC_ZIP="$WEBRTC_DIR/downloads/libwebrtc-win-x64-release.zip"
+
+          mkdir -p "$WEBRTC_DIR/downloads"
+          echo "Downloading $WEBRTC_URL"
+          curl -sLf -o "$WEBRTC_ZIP" "$WEBRTC_URL"
+          echo "Pre-extracting to $WEBRTC_DIR"
+          unzip -q "$WEBRTC_ZIP" -d "$WEBRTC_DIR/"
+
+          if [ ! -f "$WEBRTC_DIR/libwebrtc-x64-release/LICENSE" ]; then
+            echo "::error::Pre-extraction did not produce LICENSE at $WEBRTC_DIR/libwebrtc-x64-release/LICENSE"
+            ls -la "$WEBRTC_DIR/" || true
+            exit 1
+          fi
+          echo "libwebrtc pre-extracted successfully; CMake's extraction will be skipped"
+      - run: flutter build windows --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-fixed
+          path: build/windows/x64/runner/Release/
