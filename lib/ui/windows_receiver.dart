@@ -66,6 +66,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     try {
       await _channel.invokeMethod('injectPenEvent', {
         'action': event.action.index,
+        'kind': event.kind.index,
         'x': event.x,
         'y': event.y,
         'pressure': event.pressure,

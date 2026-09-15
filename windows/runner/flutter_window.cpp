@@ -33,8 +33,11 @@ bool FlutterWindow::OnCreate() {
     this->Show();
   });
 
-  // Initialize Synthetic Pointer Device for Pen
+  // Initialize Synthetic Pointer Devices (pen + touch).
+  // Each synthetic device has its own pointer type, which lets the Windows
+  // input stack deliver distinct WM_POINTERUPDATE messages for finger vs pen.
   pointer_device_ = CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT);
+  touch_device_  = CreateSyntheticPointerDevice(PT_TOUCH, 1, POINTER_FEEDBACK_DEFAULT);
 
   // Setup Method Channel for Pen Injection
   flutter::MethodChannel<> channel(
@@ -101,40 +104,90 @@ bool FlutterWindow::OnCreate() {
             return;
           }
 
-          if (this->pointer_device_ == nullptr) {
-            result->Error("NO_DEVICE", "Synthetic pointer device not created");
-            return;
+          // Pointer kind from the wire: 0=touch, 1=stylus, 2=invertedStylus, 3=mouse.
+          // Defaults to stylus so older clients (that don't send "kind") still work.
+          int kind = 1;
+          auto kindIt = args->find(flutter::EncodableValue("kind"));
+          if (kindIt != args->end()) {
+            const auto* kindVal = std::get_if<int>(&kindIt->second);
+            if (kindVal) kind = *kindVal;
           }
 
           int screenWidth = GetSystemMetrics(SM_CXSCREEN);
           int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
           POINTER_TYPE_INFO pointerInfo = {};
-          pointerInfo.type = PT_PEN;
-          pointerInfo.penInfo.pointerInfo.pointerType = PT_PEN;
-          pointerInfo.penInfo.pointerInfo.pointerId = 1;
+          HSYNTHETICPOINTERDEVICE target_device = nullptr;
+
+          // Pick the matching synthetic device and pre-fill its sub-struct.
+          // The struct is a union (touchInfo | penInfo | mouseInfo), so the
+          // "common" pointerInfo fields must be written through the active
+          // member — the helpers below do that routing.
+          if (kind == 0) { // touch
+            if (touch_device_ == nullptr) {
+              result->Error("NO_DEVICE", "Synthetic touch device not created");
+              return;
+            }
+            target_device = touch_device_;
+            pointerInfo.type = PT_TOUCH;
+            pointerInfo.touchInfo.pointerInfo.pointerType = PT_TOUCH;
+            pointerInfo.touchInfo.pointerInfo.pointerId = 1;
+            pointerInfo.touchInfo.touchFlags = TOUCH_FLAG_NONE;
+            pointerInfo.touchInfo.touchMask = TOUCH_MASK_NONE;
+          } else { // stylus, invertedStylus, or mouse all go through pen
+            if (pointer_device_ == nullptr) {
+              result->Error("NO_DEVICE", "Synthetic pen device not created");
+              return;
+            }
+            target_device = pointer_device_;
+            pointerInfo.type = PT_PEN;
+            pointerInfo.penInfo.pointerInfo.pointerType = PT_PEN;
+            pointerInfo.penInfo.pointerInfo.pointerId = 1;
+            pointerInfo.penInfo.penFlags = PEN_FLAG_NONE;
+            pointerInfo.penInfo.penMask = PEN_MASK_PRESSURE;
+          }
+
+          auto applyFlags = [&](DWORD flags) {
+            if (kind == 0) {
+              pointerInfo.touchInfo.pointerInfo.pointerFlags = flags;
+            } else {
+              pointerInfo.penInfo.pointerInfo.pointerFlags = flags;
+            }
+          };
+          auto applyLocation = [&](double lx, double ly) {
+            LONG px = static_cast<LONG>(lx * screenWidth);
+            LONG py = static_cast<LONG>(ly * screenHeight);
+            if (kind == 0) {
+              pointerInfo.touchInfo.pointerInfo.ptPixelLocation.x = px;
+              pointerInfo.touchInfo.pointerInfo.ptPixelLocation.y = py;
+            } else {
+              pointerInfo.penInfo.pointerInfo.ptPixelLocation.x = px;
+              pointerInfo.penInfo.pointerInfo.ptPixelLocation.y = py;
+            }
+          };
 
           // Action mapping
           // 0: Down, 1: Move, 2: Up, 3: Cancel, 4: Hover
           if (action == 0) {
-            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN;
+            applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN);
           } else if (action == 1) {
-            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
+            applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE);
           } else if (action == 2) {
-            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+            applyFlags(POINTER_FLAG_UP);
           } else if (action == 4) { // hover
-            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE;
+            applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE);
           } else { // cancel
-            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_UPDATE;
+            applyFlags(POINTER_FLAG_UPDATE);
           }
 
-          pointerInfo.penInfo.pointerInfo.ptPixelLocation.x = static_cast<LONG>(x * screenWidth);
-          pointerInfo.penInfo.pointerInfo.ptPixelLocation.y = static_cast<LONG>(y * screenHeight);
-          pointerInfo.penInfo.pressure = static_cast<UINT32>(pressure * 1024);
-          pointerInfo.penInfo.penFlags = PEN_FLAG_NONE;
-          pointerInfo.penInfo.penMask = PEN_MASK_PRESSURE;
+          applyLocation(x, y);
 
-          BOOL success = InjectSyntheticPointerInput(this->pointer_device_, &pointerInfo, 1);
+          // Pressure is pen-only; touch input never reports pressure.
+          if (kind != 0) {
+            pointerInfo.penInfo.pressure = static_cast<UINT32>(pressure * 1024);
+          }
+
+          BOOL success = InjectSyntheticPointerInput(target_device, &pointerInfo, 1);
           if (success) {
             result->Success();
           } else {
@@ -157,6 +210,10 @@ void FlutterWindow::OnDestroy() {
   if (pointer_device_ != nullptr) {
     DestroySyntheticPointerDevice(pointer_device_);
     pointer_device_ = nullptr;
+  }
+  if (touch_device_ != nullptr) {
+    DestroySyntheticPointerDevice(touch_device_);
+    touch_device_ = nullptr;
   }
 
   if (flutter_controller_) {

@@ -29,8 +29,9 @@ class FlutterWindow : public Win32Window {
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
 
-  // Handle for synthetic pointer device
+  // Handles for the synthetic pointer devices we inject into (pen + touch).
   HSYNTHETICPOINTERDEVICE pointer_device_ = nullptr;
+  HSYNTHETICPOINTERDEVICE touch_device_ = nullptr;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
