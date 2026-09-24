@@ -44,9 +44,11 @@ jobs:
           # Patch generated_plugins.cmake to use our copy instead of symlink
           cd $GITHUB_WORKSPACE
           PLUGINS_FILE="windows/flutter/generated_plugins.cmake"
+          echo "=== Before patch ==="
+          cat $PLUGINS_FILE
           sed -i 's|flutter/ephemeral/.plugin_symlinks/flutter_webrtc/windows|build/flutter_webrtc_real/windows|g' $PLUGINS_FILE
-          
-          cat $PLUGINS_FILE | grep -A2 -B2 flutter_webrtc || echo "Pattern not found"
+          echo "=== After patch ==="
+          cat $PLUGINS_FILE
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
