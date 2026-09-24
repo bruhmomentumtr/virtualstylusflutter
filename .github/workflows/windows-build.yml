@@ -27,58 +27,56 @@ jobs:
       - name: Workaround for flutter_webrtc extraction bug on Windows
         shell: pwsh
         run: |
-          # Copy flutter_webrtc to build dir to avoid symlink extraction issues
           $WEBRTC_SRC = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
           $WEBRTC_COPY = "build/flutter_webrtc_real"
           New-Item -ItemType Directory -Force -Path $WEBRTC_COPY | Out-Null
           Copy-Item -Path "$WEBRTC_SRC/*" -Destination $WEBRTC_COPY -Recurse -Force
-
-          # Download and extract libwebrtc to the copy
           $THIRD_PARTY = "$WEBRTC_COPY/third_party"
           New-Item -ItemType Directory -Force -Path "$THIRD_PARTY/downloads" | Out-Null
           curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o "$THIRD_PARTY/downloads/libwebrtc.zip"
           Expand-Archive -Path "$THIRD_PARTY/downloads/libwebrtc.zip" -DestinationPath $THIRD_PARTY -Force
-
-          # Write patched generated_plugins.cmake
-          $content = @'
-#
-# Generated file, do not edit.
-#
-
-list(APPEND FLUTTER_PLUGIN_LIST
-  flutter_webrtc
-)
-
-list(APPEND FLUTTER_FFI_PLUGIN_LIST
-  jni
-)
-
-set(PLUGIN_BUNDLED_LIBRARIES)
-
-add_subdirectory(build/flutter_webrtc_real/windows plugins/flutter_webrtc)
-target_link_libraries(${BINARY_NAME} PRIVATE flutter_webrtc_plugin)
-list(APPEND PLUGIN_BUNDLED_LIBRARIES $<TARGET_FILE:flutter_webrtc_plugin>)
-list(APPEND PLUGIN_BUNDLED_LIBRARIES ${flutter_webrtc_bundled_libraries})
-
-foreach(plugin ${FLUTTER_PLUGIN_LIST})
-  if(plugin STREQUAL "flutter_webrtc")
-    continue()
-  endif()
-  add_subdirectory(flutter/ephemeral/.plugin_symlinks/${plugin}/windows plugins/${plugin})
-  target_link_libraries(${BINARY_NAME} PRIVATE ${plugin}_plugin)
-  list(APPEND PLUGIN_BUNDLED_LIBRARIES $<TARGET_FILE:${plugin}_plugin>)
-  list(APPEND PLUGIN_BUNDLED_LIBRARIES ${${plugin}_bundled_libraries})
-endforeach(plugin)
-
-foreach(ffi_plugin ${FLUTTER_FFI_PLUGIN_LIST})
-  add_subdirectory(flutter/ephemeral/.plugin_symlinks/${ffi_plugin}/windows plugins/${ffi_plugin})
-  list(APPEND PLUGIN_BUNDLED_LIBRARIES ${${ffi_plugin}_bundled_libraries})
-endforeach(ffi_plugin)
-'@
-          $content | Out-File -FilePath "windows/flutter/generated_plugins.cmake" -Encoding utf8
+      - name: Patch generated_plugins.cmake
+        shell: pwsh
+        run: |
+          $lines = @(
+            '#'
+            '# Generated file, do not edit.'
+            '#'
+            ''
+            'list(APPEND FLUTTER_PLUGIN_LIST'
+            '  flutter_webrtc'
+            ')'
+            ''
+            'list(APPEND FLUTTER_FFI_PLUGIN_LIST'
+            '  jni'
+            ')'
+            ''
+            'set(PLUGIN_BUNDLED_LIBRARIES)'
+            ''
+            'add_subdirectory(build/flutter_webrtc_real/windows plugins/flutter_webrtc)'
+            'target_link_libraries(${BINARY_NAME} PRIVATE flutter_webrtc_plugin)'
+            'list(APPEND PLUGIN_BUNDLED_LIBRARIES $<TARGET_FILE:flutter_webrtc_plugin>)'
+            'list(APPEND PLUGIN_BUNDLED_LIBRARIES ${flutter_webrtc_bundled_libraries})'
+            ''
+            'foreach(plugin ${FLUTTER_PLUGIN_LIST})'
+            '  if(plugin STREQUAL "flutter_webrtc")'
+            '    continue()'
+            '  endif()'
+            '  add_subdirectory(flutter/ephemeral/.plugin_symlinks/${plugin}/windows plugins/${plugin})'
+            '  target_link_libraries(${BINARY_NAME} PRIVATE ${plugin}_plugin)'
+            '  list(APPEND PLUGIN_BUNDLED_LIBRARIES $<TARGET_FILE:${plugin}_plugin>)'
+            '  list(APPEND PLUGIN_BUNDLED_LIBRARIES ${${plugin}_bundled_libraries})'
+            'endforeach(plugin)'
+            ''
+            'foreach(ffi_plugin ${FLUTTER_FFI_PLUGIN_LIST})'
+            '  add_subdirectory(flutter/ephemeral/.plugin_symlinks/${ffi_plugin}/windows plugins/${ffi_plugin})'
+            '  list(APPEND PLUGIN_BUNDLED_LIBRARIES ${${ffi_plugin}_bundled_libraries})'
+            'endforeach(ffi_plugin)'
+          )
+          Set-Content -Path "windows/flutter/generated_plugins.cmake" -Value $lines
           Get-Content "windows/flutter/generated_plugins.cmake"
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release-fixed
-          path: build/windows/x64/runner/Release/
+        path: build/windows/x64/runner/Release/
