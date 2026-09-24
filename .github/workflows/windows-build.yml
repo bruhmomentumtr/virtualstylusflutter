@@ -20,20 +20,30 @@ jobs:
           channel: 'stable'
           cache: true
       - run: flutter pub get
-      - name: Clean up any previous build artifacts that may interfere
+      - name: Clean up any previous build artifacts
         shell: pwsh
         run: |
-          Remove-Item -Recurse -Force "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party/libwebrtc-x64-release" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party/downloads" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
       - name: Workaround for flutter_webrtc extraction bug on Windows
         shell: bash
         run: |
-          WEBRTC_DIR="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party"
-          mkdir -p $WEBRTC_DIR/downloads
-          curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
-          unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/
-          ls -la $WEBRTC_DIR/
+          # Copy flutter_webrtc to build dir to avoid symlink extraction issues
+          WEBRTC_SRC="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
+          WEBRTC_COPY="build/flutter_webrtc_real"
+          mkdir -p $WEBRTC_COPY
+          cp -r $WEBRTC_SRC/. $WEBRTC_COPY/
+          
+          # Download and extract libwebrtc to the copy
+          cd $WEBRTC_COPY/third_party
+          mkdir -p downloads
+          curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o downloads/libwebrtc.zip
+          unzip -q downloads/libwebrtc.zip -d .
+          
+          # Patch generated_plugins.cmake to use our copy instead of symlink
+          PLUGINS_FILE="windows/flutter/generated_plugins.cmake"
+          sed -i 's|flutter/ephemeral/.plugin_symlinks/flutter_webrtc/windows|build/flutter_webrtc_real/windows|g' $PLUGINS_FILE
+          
+          cat $PLUGINS_FILE | grep -A2 -B2 flutter_webrtc || echo "Pattern not found"
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
