@@ -20,6 +20,12 @@ jobs:
           channel: 'stable'
           cache: true
       - run: flutter pub get
+      - name: Clean up any previous build artifacts that may interfere
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party/libwebrtc-x64-release" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party/downloads" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "build" -ErrorAction SilentlyContinue
       - name: Workaround for flutter_webrtc extraction bug on Windows
         shell: bash
         run: |
@@ -27,6 +33,7 @@ jobs:
           mkdir -p $WEBRTC_DIR/downloads
           curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
           unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/
+          ls -la $WEBRTC_DIR/
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
