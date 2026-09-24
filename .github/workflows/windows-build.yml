@@ -1,17 +1,5 @@
 name: Flutter Windows Build (Fixed)
 
-# Parallel workflow to .github/workflows/build.yml. The libwebrtc
-# extraction workaround lives in windows/CMakeLists.txt now — it copies
-# the flutter_webrtc plugin to a non-symlinked directory, pre-extracts
-# the libwebrtc archive there, and patches generated_plugins.cmake to
-# include the copy. This workflow therefore only needs to:
-#   1. Recover from any previous run that left a real directory at
-#      .plugin_symlinks/flutter_webrtc/ (Flutter's _createPlatformPluginSymlinks
-#      refuses to recreate a symlink over an existing real directory,
-#      with errno 183).
-#   2. Run a clean `flutter pub get` so symlinks are in place.
-#   3. Run `flutter build windows --release` and upload the artifact.
-
 on:
   push:
     branches:
@@ -27,26 +15,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Recover from any prior broken flutter_webrtc symlink
-        shell: pwsh
-        run: |
-          $link = "windows\flutter\ephemeral\.plugin_symlinks\flutter_webrtc"
-          if (Test-Path $link) {
-            $item = Get-Item $link -Force
-            if (-not $item.LinkType) {
-              Write-Host "Removing real directory at $link (was a symlink in a previous run; Flutter refuses to recreate over a real dir)"
-              Remove-Item -Recurse -Force $link
-            } else {
-              Write-Host "Symlink at $link is intact ($($item.LinkType) -> $($item.Target))"
-            }
-          } else {
-            Write-Host "No prior flutter_webrtc symlink found"
-          }
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
       - run: flutter pub get
+      - name: Workaround for flutter_webrtc extraction bug on Windows
+        shell: bash
+        run: |
+          WEBRTC_DIR="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party"
+          mkdir -p $WEBRTC_DIR/downloads
+          curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
+          unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
