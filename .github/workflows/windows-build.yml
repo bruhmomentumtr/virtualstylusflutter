@@ -1,4 +1,4 @@
-name: Flutter Windows Build (Fixed)
+name: Flutter Windows Build
 
 on:
   push:
@@ -21,25 +21,16 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: Workaround for flutter_webrtc extraction bug on Windows
-        shell: pwsh
+        shell: bash
         run: |
-          $SYMLINK = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
-          Remove-Item -Recurse -Force $SYMLINK
-          New-Item -ItemType Directory -Force -Path $SYMLINK | Out-Null
-          $PUB_CACHE = "C:\Users\runneradmin\AppData\Local\Pub\Cache\Hosted\pub.dev\flutter_webrtc-1.5.1"
-          if (-not (Test-Path $PUB_CACHE)) {
-            $PUB_CACHE = (Get-ChildItem "C:\Users\runneradmin\AppData\Local\Pub\Cache\Hosted\pub.dev" -Directory -Filter "flutter_webrtc-*" | Select-Object -First 1).FullName
-          }
-          Write-Host "Copying flutter_webrtc from $PUB_CACHE to $SYMLINK"
-          Copy-Item -Path "$PUB_CACHE/*" -Destination $SYMLINK -Recurse -Force
-          $THIRD_PARTY = "$SYMLINK/third_party"
-          New-Item -ItemType Directory -Force -Path "$THIRD_PARTY/downloads" | Out-Null
-          curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o "$THIRD_PARTY/downloads/libwebrtc.zip"
-          Expand-Archive -Path "$THIRD_PARTY/downloads/libwebrtc.zip" -DestinationPath $THIRD_PARTY -Force
-          Write-Host "Final third_party contents:"
-          Get-ChildItem $THIRD_PARTY | Format-Table -AutoSize
+          WEBRTC_DIR="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party"
+          mkdir -p $WEBRTC_DIR/downloads
+          curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
+          unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/
+          echo "=== Contents of third_party ==="
+          ls -la $WEBRTC_DIR/
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-release-fixed
-          path: build/windows/x64/runner/Release/
+          name: windows-release
+        path: build/windows/x64/runner/Release/
