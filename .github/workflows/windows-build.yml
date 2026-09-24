@@ -44,10 +44,43 @@ jobs:
           # Patch generated_plugins.cmake to use our copy instead of symlink
           cd $GITHUB_WORKSPACE
           PLUGINS_FILE="windows/flutter/generated_plugins.cmake"
-          echo "=== Before patch ==="
-          cat $PLUGINS_FILE
-          sed -i 's|flutter/ephemeral/.plugin_symlinks/flutter_webrtc/windows|build/flutter_webrtc_real/windows|g' $PLUGINS_FILE
-          echo "=== After patch ==="
+          # Replace the foreach block to handle flutter_webrtc separately
+          cat > $PLUGINS_FILE << 'PLUGINSEOF'
+#
+# Generated file, do not edit.
+#
+
+list(APPEND FLUTTER_PLUGIN_LIST
+  flutter_webrtc
+)
+
+list(APPEND FLUTTER_FFI_PLUGIN_LIST
+  jni
+)
+
+set(PLUGIN_BUNDLED_LIBRARIES)
+
+add_subdirectory(build/flutter_webrtc_real/windows plugins/flutter_webrtc)
+target_link_libraries(${BINARY_NAME} PRIVATE flutter_webrtc_plugin)
+list(APPEND PLUGIN_BUNDLED_LIBRARIES $<TARGET_FILE:flutter_webrtc_plugin>)
+list(APPEND PLUGIN_BUNDLED_LIBRARIES ${flutter_webrtc_bundled_libraries})
+
+foreach(plugin flutter_webrtc)
+  if(plugin STREQUAL "flutter_webrtc")
+    continue()
+  endif()
+  add_subdirectory(flutter/ephemeral/.plugin_symlinks/${plugin}/windows plugins/${plugin})
+  target_link_libraries(${BINARY_NAME} PRIVATE ${plugin}_plugin)
+  list(APPEND PLUGIN_BUNDLED_LIBRARIES $<TARGET_FILE:${plugin}_plugin>)
+  list(APPEND PLUTTER_BUNDLED_LIBRARIES ${${plugin}_bundled_libraries})
+endforeach(plugin)
+
+foreach(ffi_plugin ${FLUTTER_FFI_PLUGIN_LIST})
+  add_subdirectory(flutter/ephemeral/.plugin_symlinks/${ffi_plugin}/windows plugins/${ffi_plugin})
+  list(APPEND PLUGIN_BUNDLED_LIBRARIES ${${ffi_plugin}_bundled_libraries})
+endforeach(ffi_plugin)
+PLUGINSEOF
+          echo "=== Patched file ==="
           cat $PLUGINS_FILE
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
