@@ -57,7 +57,7 @@ add_subdirectory("runner")
 set(FLUTTER_PLUGIN_LIST)
 set(PLUGIN_BUNDLED_LIBRARIES)
 
-include(flutter/ephemeral/generated_plugins.cmake)
+include(flutter/generated_plugins.cmake)
 
 
 # === Installation ===
