@@ -27,9 +27,11 @@ jobs:
       - name: Workaround for flutter_webrtc extraction bug on Windows
         shell: bash
         run: |
+          pwd
+          ls -la
           # Copy flutter_webrtc to build dir to avoid symlink extraction issues
           WEBRTC_SRC="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
-          WEBRTC_COPY="build/flutter_webrtc_real"
+          WEBRTC_COPY="$GITHUB_WORKSPACE/build/flutter_webrtc_real"
           mkdir -p $WEBRTC_COPY
           cp -r $WEBRTC_SRC/. $WEBRTC_COPY/
           
@@ -40,6 +42,7 @@ jobs:
           unzip -q downloads/libwebrtc.zip -d .
           
           # Patch generated_plugins.cmake to use our copy instead of symlink
+          cd $GITHUB_WORKSPACE
           PLUGINS_FILE="windows/flutter/generated_plugins.cmake"
           sed -i 's|flutter/ephemeral/.plugin_symlinks/flutter_webrtc/windows|build/flutter_webrtc_real/windows|g' $PLUGINS_FILE
           
