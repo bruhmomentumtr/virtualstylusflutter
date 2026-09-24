@@ -55,7 +55,73 @@ add_subdirectory("runner")
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
-include(flutter/generated_plugins.cmake)
+#
+# Workaround for flutter_webrtc on Windows: the plugin's CMakeLists.txt
+# downloads and extracts the libwebrtc archive via file(ARCHIVE_EXTRACT),
+# which fails with "Cannot extract through symlink" because the plugin
+# lives at windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/ —
+# a Windows symlink to the read-only pub cache, and libarchive refuses
+# to write through symlinks.
+#
+# We work around this by:
+#   1. Copying the plugin source to a non-symlinked directory under
+#      CMAKE_BINARY_DIR (only when not already present).
+#   2. Pre-downloading the libwebrtc archive into that copy.
+#   3. Pre-extracting it so the plugin's CMakeLists.txt sees the LICENSE
+#      file and skips file(ARCHIVE_EXTRACT) entirely.
+#   4. Patching generated_plugins.cmake in-memory so flutter_webrtc is
+#      added from the copy, while every other plugin keeps using its
+#      existing symlink. The original .plugin_symlinks/flutter_webrtc
+#      symlink is left intact so subsequent `flutter pub get` /
+#      `flutter build` invocations can recreate it without "path
+# already exists" errors.
+set(_vs_webRTC_real_root "${CMAKE_BINARY_DIR}/_vs_real_plugins")
+set(_vs_webRTC_real_plugin "${_vs_webRTC_real_root}/flutter_webrtc/windows")
+set(_vs_webRTC_sym_plugin "${CMAKE_CURRENT_SOURCE_DIR}/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/windows")
+
+if(NOT EXISTS "${_vs_webRTC_real_plugin}/CMakeLists.txt")
+  message(STATUS "flutter_webrtc: copying plugin to ${_vs_webRTC_real_plugin}")
+  file(MAKE_DIRECTORY "${_vs_webRTC_real_plugin}")
+  file(COPY "${_vs_webRTC_sym_plugin}/" DESTINATION "${_vs_webRTC_real_plugin}")
+endif()
+
+set(_vs_webRTC_third_party "${_vs_webRTC_real_plugin}/third_party")
+set(_vs_webRTC_license "${_vs_webRTC_third_party}/libwebrtc-x64-release/LICENSE")
+if(NOT EXISTS "${_vs_webRTC_license}")
+  message(STATUS "flutter_webrtc: pre-extracting libwebrtc (skips plugin's file(ARCHIVE_EXTRACT))")
+  set(_vs_webRTC_downloads "${_vs_webRTC_third_party}/downloads")
+  file(MAKE_DIRECTORY "${_vs_webRTC_downloads}")
+  set(_vs_webRTC_zip "${_vs_webRTC_downloads}/libwebrtc-win-x64-release.zip")
+  file(DOWNLOAD
+    "https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip"
+    "${_vs_webRTC_zip}"
+    SHOW_PROGRESS
+    STATUS _vs_webRTC_dl_status)
+  list(GET _vs_webRTC_dl_status 0 _vs_webRTC_dl_code)
+  if(NOT _vs_webRTC_dl_code EQUAL 0)
+    message(FATAL_ERROR "flutter_webrtc: libwebrtc download failed: ${_vs_webRTC_dl_status}")
+  endif()
+  file(ARCHIVE_EXTRACT INPUT "${_vs_webRTC_zip}" DESTINATION "${_vs_webRTC_third_party}")
+endif()
+
+# Patch generated_plugins.cmake so flutter_webrtc is added from our
+# non-symlinked copy, while every other plugin keeps its existing
+# symlinked path. The substitution runs on the file contents as a string;
+# the ${plugin} / ${CMAKE_BINARY_DIR} placeholders are preserved in the
+# written file and expanded at include time.
+set(_vs_plugins_file "${CMAKE_CURRENT_SOURCE_DIR}/flutter/generated_plugins.cmake")
+file(READ "${_vs_plugins_file}" _vs_plugins_content)
+set(_vs_orig_line "add_subdirectory(flutter/ephemeral/.plugin_symlinks/\${plugin}/windows plugins/\${plugin})")
+set(_vs_patched_line "if(\${plugin} STREQUAL \"flutter_webrtc\")\n  add_subdirectory(\${CMAKE_BINARY_DIR}/_vs_real_plugins/\${plugin}/windows plugins/\${plugin})\nelse()\n  add_subdirectory(flutter/ephemeral/.plugin_symlinks/\${plugin}/windows plugins/\${plugin})\nendif()")
+string(REPLACE "${_vs_orig_line}" "${_vs_patched_line}" _vs_plugins_content_new "${_vs_plugins_content}")
+
+if(_vs_plugins_content STREQUAL _vs_plugins_content_new)
+  message(WARNING "flutter_webrtc: generated_plugins.cmake patch did not match; build may fail")
+endif()
+
+set(_vs_plugins_patched "${CMAKE_BINARY_DIR}/generated_plugins_patched.cmake")
+file(WRITE "${_vs_plugins_patched}" "${_vs_plugins_content_new}")
+include("${_vs_plugins_patched}")
 
 
 # === Installation ===

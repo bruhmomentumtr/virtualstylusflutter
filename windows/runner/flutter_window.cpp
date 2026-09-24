@@ -133,7 +133,13 @@ bool FlutterWindow::OnCreate() {
             pointerInfo.touchInfo.pointerInfo.pointerType = PT_TOUCH;
             pointerInfo.touchInfo.pointerInfo.pointerId = 1;
             pointerInfo.touchInfo.touchFlags = TOUCH_FLAG_NONE;
-            pointerInfo.touchInfo.touchMask = TOUCH_MASK_NONE;
+            pointerInfo.touchInfo.touchMask = TOUCH_MASK_CONTACTAREA;
+            pointerInfo.touchInfo.pointerInfo.ptPixelLocation.x = 0;
+            pointerInfo.touchInfo.pointerInfo.ptPixelLocation.y = 0;
+            pointerInfo.touchInfo.rcContactArea.left = 0;
+            pointerInfo.touchInfo.rcContactArea.top = 0;
+            pointerInfo.touchInfo.rcContactArea.right = 4;
+            pointerInfo.touchInfo.rcContactArea.bottom = 4;
           } else { // stylus, invertedStylus, or mouse all go through pen
             if (pointer_device_ == nullptr) {
               result->Error("NO_DEVICE", "Synthetic pen device not created");
@@ -169,7 +175,11 @@ bool FlutterWindow::OnCreate() {
           // Action mapping
           // 0: Down, 1: Move, 2: Up, 3: Cancel, 4: Hover
           if (action == 0) {
-            applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN);
+            if (kind == 0) { // touch down needs POINTER_FLAG_NEW
+              applyFlags(POINTER_FLAG_NEW | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN);
+            } else {
+              applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN);
+            }
           } else if (action == 1) {
             applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE);
           } else if (action == 2) {
