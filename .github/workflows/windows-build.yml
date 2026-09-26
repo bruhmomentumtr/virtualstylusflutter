@@ -23,11 +23,34 @@ jobs:
       - name: Workaround for flutter_webrtc extraction bug on Windows
         shell: bash
         run: |
+          # The flutter_webrtc plugin's CMakeLists.txt does file(ARCHIVE_EXTRACT)
+          # which fails through symlinks. But it skips extraction if the
+          # `libwebrtc/` directory already exists. We pre-extract the zip so
+          # the conditional kicks in.
           WEBRTC_DIR="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party"
           mkdir -p $WEBRTC_DIR/downloads
-          curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
-          unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/
-          echo "=== Contents of third_party ==="
+          if [ ! -f $WEBRTC_DIR/downloads/libwebrtc.zip ]; then
+            curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
+          fi
+          if [ ! -d $WEBRTC_DIR/libwebrtc ]; then
+            echo "Extracting libwebrtc..."
+            mkdir -p $WEBRTC_DIR/libwebrtc
+            unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/.extract_tmp
+            # _libwebrtc_extract_and_normalize puts files under libwebrtc/<archive-contents>
+            # when there's a single top-level dir; otherwise flattens them.
+            ENTRIES=$(ls $WEBRTC_DIR/.extract_tmp)
+            if [ "$(echo "$ENTRIES" | wc -l)" = "1" ] && [ -d "$WEBRTC_DIR/.extract_tmp/$ENTRIES" ]; then
+              mv $WEBRTC_DIR/.extract_tmp/$ENTRIES $WEBRTC_DIR/libwebrtc-contents
+              mkdir -p $WEBRTC_DIR/libwebrtc
+              mv $WEBRTC_DIR/libwebrtc-contents/* $WEBRTC_DIR/libwebrtc/
+              rmdir $WEBRTC_DIR/libwebrtc-contents
+            else
+              mkdir -p $WEBRTC_DIR/libwebrtc
+              mv $WEBRTC_DIR/.extract_tmp/* $WEBRTC_DIR/libwebrtc/
+            fi
+            rm -rf $WEBRTC_DIR/.extract_tmp
+          fi
+          echo "=== third_party contents ==="
           ls -la $WEBRTC_DIR/
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
