@@ -20,38 +20,49 @@ jobs:
           channel: 'stable'
           cache: true
       - run: flutter pub get
-      - name: Workaround for flutter_webrtc extraction bug on Windows
-        shell: bash
+      - name: Workaround for flutter_webrtc extraction bug
+        shell: pwsh
         run: |
-          # The flutter_webrtc plugin's CMakeLists.txt does file(ARCHIVE_EXTRACT)
-          # which fails through symlinks. But it skips extraction if the
-          # `libwebrtc/` directory already exists. We pre-extract the zip so
-          # the conditional kicks in.
-          WEBRTC_DIR="windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party"
-          mkdir -p $WEBRTC_DIR/downloads
-          if [ ! -f $WEBRTC_DIR/downloads/libwebrtc.zip ]; then
-            curl -sL https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip -o $WEBRTC_DIR/downloads/libwebrtc.zip
-          fi
-          if [ ! -d $WEBRTC_DIR/libwebrtc ]; then
-            echo "Extracting libwebrtc..."
-            mkdir -p $WEBRTC_DIR/libwebrtc
-            unzip -q $WEBRTC_DIR/downloads/libwebrtc.zip -d $WEBRTC_DIR/.extract_tmp
-            # _libwebrtc_extract_and_normalize puts files under libwebrtc/<archive-contents>
-            # when there's a single top-level dir; otherwise flattens them.
-            ENTRIES=$(ls $WEBRTC_DIR/.extract_tmp)
-            if [ "$(echo "$ENTRIES" | wc -l)" = "1" ] && [ -d "$WEBRTC_DIR/.extract_tmp/$ENTRIES" ]; then
-              mv $WEBRTC_DIR/.extract_tmp/$ENTRIES $WEBRTC_DIR/libwebrtc-contents
-              mkdir -p $WEBRTC_DIR/libwebrtc
-              mv $WEBRTC_DIR/libwebrtc-contents/* $WEBRTC_DIR/libwebrtc/
-              rmdir $WEBRTC_DIR/libwebrtc-contents
-            else
-              mkdir -p $WEBRTC_DIR/libwebrtc
-              mv $WEBRTC_DIR/.extract_tmp/* $WEBRTC_DIR/libwebrtc/
-            fi
-            rm -rf $WEBRTC_DIR/.extract_tmp
-          fi
-          echo "=== third_party contents ==="
-          ls -la $WEBRTC_DIR/
+          # Resolve the actual target directory of the symlink/junction so we can
+          # write through to the real pub cache path (symlinks to the pub cache
+          # are read-only as far as libarchive is concerned, but PowerShell /
+          # Expand-Archive will write through to the real path).
+          $symlink = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
+          $item = Get-Item $symlink -Force
+          Write-Host "LinkType: $($item.LinkType)"
+          Write-Host "Target: $($item.Target)"
+          $realThirdParty = Join-Path $item.Target "third_party"
+
+          $downloadsDir = Join-Path $realThirdParty "downloads"
+          $zipPath = Join-Path $downloadsDir "libwebrtc-win-x64-release.zip"
+          $libwebrtcDir = Join-Path $realThirdParty "libwebrtc"
+
+          New-Item -ItemType Directory -Force -Path $downloadsDir | Out-Null
+
+          if (-not (Test-Path $zipPath)) {
+            Write-Host "Downloading libwebrtc..."
+            Invoke-WebRequest -Uri "https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip" -OutFile $zipPath
+          }
+
+          if (-not (Test-Path $libwebrtcDir)) {
+            Write-Host "Pre-extracting libwebrtc to libwebrtc/ so CMake skips file(ARCHIVE_EXTRACT)..."
+            New-Item -ItemType Directory -Force -Path $libwebrtcDir | Out-Null
+            $tempExtract = Join-Path $realThirdParty ".extract_tmp"
+            if (Test-Path $tempExtract) { Remove-Item -Recurse -Force $tempExtract }
+            New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
+            Expand-Archive -Path $zipPath -DestinationPath $tempExtract
+            $entries = Get-ChildItem $tempExtract
+            if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) {
+              # Mirror _libwebrtc_extract_and_normalize's single-dir promotion.
+              Move-Item -Path (Join-Path $tempExtract $entries[0].Name) -Destination $libwebrtcDir
+            } else {
+              Get-ChildItem $tempExtract | Move-Item -Destination $libwebrtcDir
+            }
+            Remove-Item -Recurse -Force $tempExtract
+          }
+
+          Write-Host "=== third_party contents ==="
+          Get-ChildItem $realThirdParty | Format-Table -AutoSize
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
