@@ -21,76 +21,61 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: Workaround for flutter_webrtc extraction bug
-        shell: pwsh
+        shell: bash
         run: |
-          # Bypass the junction and locate flutter_webrtc directly in the pub
-          # cache. Writing through the junction has proven unreliable, so we
-          # do everything in the real cache directory and let the junction
-          # pick up the resulting files.
-          $pubCache = Join-Path $env:LOCALAPPDATA "Pub\Cache\hosted\pub.dev"
-          $webRtc = Get-ChildItem $pubCache -Directory -Filter "flutter_webrtc-*" | Select-Object -First 1
-          if (-not $webRtc) {
-            throw "flutter_webrtc not found in $pubCache"
-          }
-          Write-Host "Real path: $($webRtc.FullName)"
+          # Locate the flutter_webrtc directory in the pub cache (bypassing
+          # the junction, which CMake/libarchive cannot write through).
+          PUB_CACHE="$LOCALAPPDATA/Pub/Cache/hosted/pub.dev"
+          WEBRTC=$(find "$PUB_CACHE" -maxdepth 1 -type d -name 'flutter_webrtc-*' | head -1)
+          if [ -z "$WEBRTC" ]; then
+            echo "::error::flutter_webrtc not found in $PUB_CACHE"
+            exit 1
+          fi
+          echo "Real flutter_webrtc path: $WEBRTC"
+          THIRD_PARTY="$WEBRTC/third_party"
+          DOWNLOADS="$THIRD_PARTY/downloads"
+          ZIP="$DOWNLOADS/libwebrtc-win-x64-release.zip"
+          LIBWEBRTC="$THIRD_PARTY/libwebrtc"
 
-          $thirdParty = Join-Path $webRtc.FullName "third_party"
-          $downloadsDir = Join-Path $thirdParty "downloads"
-          $zipPath = Join-Path $downloadsDir "libwebrtc-win-x64-release.zip"
-          $libwebrtcDir = Join-Path $thirdParty "libwebrtc"
+          mkdir -p "$DOWNLOADS"
 
-          # Verify we can write to the pub cache.
-          $writeTest = Join-Path $thirdParty "_writetest.tmp"
-          "ok" | Out-File $writeTest -Encoding ascii
-          if (-not (Test-Path $writeTest)) {
-            throw "Cannot write to pub cache at $thirdParty"
-          }
-          Remove-Item $writeTest
+          if [ ! -f "$ZIP" ]; then
+            echo "Downloading libwebrtc..."
+            curl -sL "https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip" -o "$ZIP"
+          fi
 
-          New-Item -ItemType Directory -Force -Path $downloadsDir | Out-Null
+          if [ ! -d "$LIBWEBRTC" ]; then
+            echo "Pre-extracting libwebrtc to libwebrtc/ ..."
+            TMP_EXTRACT="$RUNNER_TEMP/webrtc_extract"
+            rm -rf "$TMP_EXTRACT"
+            mkdir -p "$TMP_EXTRACT"
+            unzip -q "$ZIP" -d "$TMP_EXTRACT"
+            ENTRIES=$(ls "$TMP_EXTRACT")
+            ENTRY_COUNT=$(echo "$ENTRIES" | wc -l)
+            if [ "$ENTRY_COUNT" = "1" ] && [ -d "$TMP_EXTRACT/$ENTRIES" ]; then
+              # Single top-level dir — rename it to libwebrtc (mirrors CMake logic).
+              mv "$TMP_EXTRACT/$ENTRIES" "$LIBWEBRTC"
+            else
+              mkdir -p "$LIBWEBRTC"
+              mv "$TMP_EXTRACT"/* "$LIBWEBRTC"/
+            fi
+            rm -rf "$TMP_EXTRACT"
+          fi
 
-          if (-not (Test-Path $zipPath)) {
-            Write-Host "Downloading libwebrtc..."
-            Invoke-WebRequest -Uri "https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip" -OutFile $zipPath
-          }
+          # Patch the plugin's CMakeLists.txt so CMake skips its file(ARCHIVE_EXTRACT)
+          # call. The directory we just created satisfies the existence check; without
+          # this, CMake's libarchive call tries to extract through the junction and fails.
+          echo "Patching $THIRD_PARTY/CMakeLists.txt to skip file(ARCHIVE_EXTRACT)..."
+          sed -i 's|file(ARCHIVE_EXTRACT|# file(ARCHIVE_EXTRACT|g' "$THIRD_PARTY/CMakeLists.txt"
 
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-          $topLevel = @{}
-          foreach ($e in $zip.Entries) {
-            $first = ($e.FullName -split '/')[0]
-            $topLevel[$first] = $true
-          }
-          $zip.Dispose()
-          Write-Host "=== Zip top-level entries ==="
-          $topLevel.Keys | ForEach-Object { Write-Host "  $_" }
-
-          if (-not (Test-Path $libwebrtcDir)) {
-            Write-Host "Pre-extracting libwebrtc to libwebrtc/ ..."
-            $tempExtract = Join-Path $thirdParty ".extract_tmp"
-            if (Test-Path $tempExtract) { Remove-Item -Recurse -Force $tempExtract }
-            New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
-            Expand-Archive -Path $zipPath -DestinationPath $tempExtract
-            $entries = Get-ChildItem $tempExtract
-            if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) {
-              Rename-Item -Path (Join-Path $tempExtract $entries[0].Name) -NewName "libwebrtc"
-            } else {
-              New-Item -ItemType Directory -Force -Path $libwebrtcDir | Out-Null
-              Get-ChildItem $tempExtract | Move-Item -Destination $libwebrtcDir
-            }
-            if (Test-Path $tempExtract) { Remove-Item -Recurse -Force $tempExtract }
-          }
-
-          Write-Host "=== third_party contents ==="
-          Get-ChildItem $thirdParty | Format-Table -AutoSize
-          if (Test-Path $libwebrtcDir) {
-            Write-Host "=== libwebrtc contents ==="
-            Get-ChildItem $libwebrtcDir | Format-Table -AutoSize
-            if (Test-Path (Join-Path $libwebrtcDir "include")) {
-              Write-Host "=== libwebrtc/include (first 20) ==="
-              Get-ChildItem (Join-Path $libwebrtcDir "include") | Select-Object -First 20 | Format-Table -AutoSize
-            }
-          }
+          echo "=== third_party contents ==="
+          ls -la "$THIRD_PARTY"
+          echo "=== libwebrtc contents (top level) ==="
+          ls -la "$LIBWEBRTC" | head -30
+          if [ -d "$LIBWEBRTC/include" ]; then
+            echo "=== libwebrtc/include (top 20) ==="
+            ls "$LIBWEBRTC/include" | head -20
+          fi
       - run: flutter build windows --release
       - uses: actions/upload-artifact@v4
         with:
