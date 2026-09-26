@@ -134,12 +134,10 @@ bool FlutterWindow::OnCreate() {
             pointerInfo.touchInfo.pointerInfo.pointerId = 1;
             pointerInfo.touchInfo.touchFlags = TOUCH_FLAG_NONE;
             pointerInfo.touchInfo.touchMask = TOUCH_MASK_CONTACTAREA;
-            pointerInfo.touchInfo.pointerInfo.ptPixelLocation.x = 0;
-            pointerInfo.touchInfo.pointerInfo.ptPixelLocation.y = 0;
-            pointerInfo.touchInfo.rcContactArea.left = 0;
-            pointerInfo.touchInfo.rcContactArea.top = 0;
-            pointerInfo.touchInfo.rcContactArea.right = 4;
-            pointerInfo.touchInfo.rcContactArea.bottom = 4;
+            pointerInfo.touchInfo.rcContact.left = 0;
+            pointerInfo.touchInfo.rcContact.top = 0;
+            pointerInfo.touchInfo.rcContact.right = 4;
+            pointerInfo.touchInfo.rcContact.bottom = 4;
           } else { // stylus, invertedStylus, or mouse all go through pen
             if (pointer_device_ == nullptr) {
               result->Error("NO_DEVICE", "Synthetic pen device not created");
