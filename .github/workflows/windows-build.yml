@@ -23,15 +23,29 @@ jobs:
       - name: Workaround for flutter_webrtc extraction bug
         shell: pwsh
         run: |
-          $symlink = "windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc"
-          $item = Get-Item $symlink -Force
-          Write-Host "LinkType: $($item.LinkType)"
-          Write-Host "Target: $($item.Target)"
-          $realThirdParty = Join-Path $item.Target "third_party"
+          # Bypass the junction and locate flutter_webrtc directly in the pub
+          # cache. Writing through the junction has proven unreliable, so we
+          # do everything in the real cache directory and let the junction
+          # pick up the resulting files.
+          $pubCache = Join-Path $env:LOCALAPPDATA "Pub\Cache\hosted\pub.dev"
+          $webRtc = Get-ChildItem $pubCache -Directory -Filter "flutter_webrtc-*" | Select-Object -First 1
+          if (-not $webRtc) {
+            throw "flutter_webrtc not found in $pubCache"
+          }
+          Write-Host "Real path: $($webRtc.FullName)"
 
-          $downloadsDir = Join-Path $realThirdParty "downloads"
+          $thirdParty = Join-Path $webRtc.FullName "third_party"
+          $downloadsDir = Join-Path $thirdParty "downloads"
           $zipPath = Join-Path $downloadsDir "libwebrtc-win-x64-release.zip"
-          $libwebrtcDir = Join-Path $realThirdParty "libwebrtc"
+          $libwebrtcDir = Join-Path $thirdParty "libwebrtc"
+
+          # Verify we can write to the pub cache.
+          $writeTest = Join-Path $thirdParty "_writetest.tmp"
+          "ok" | Out-File $writeTest -Encoding ascii
+          if (-not (Test-Path $writeTest)) {
+            throw "Cannot write to pub cache at $thirdParty"
+          }
+          Remove-Item $writeTest
 
           New-Item -ItemType Directory -Force -Path $downloadsDir | Out-Null
 
@@ -40,30 +54,27 @@ jobs:
             Invoke-WebRequest -Uri "https://github.com/webrtc-sdk/libwebrtc/releases/download/libwebrtc.m144.7559.09/libwebrtc-win-x64-release.zip" -OutFile $zipPath
           }
 
-          # Inspect zip contents to understand structure.
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-          Write-Host "=== Zip top-level entries ==="
-          $zip.Entries | ForEach-Object { Write-Host $_.FullName }
-          $topLevel = $zip.Entries | Where-Object { -not ($_.FullName -match '/') -or ($_.FullName.Split('/').Count -eq 2 -and $_.FullName.EndsWith('/')) } | Select-Object -ExpandProperty FullName
-          Write-Host "=== Top-level dirs/files ==="
-          $topLevel | ForEach-Object { Write-Host $_ }
+          $topLevel = @{}
+          foreach ($e in $zip.Entries) {
+            $first = ($e.FullName -split '/')[0]
+            $topLevel[$first] = $true
+          }
           $zip.Dispose()
+          Write-Host "=== Zip top-level entries ==="
+          $topLevel.Keys | ForEach-Object { Write-Host "  $_" }
 
           if (-not (Test-Path $libwebrtcDir)) {
-            Write-Host "Pre-extracting libwebrtc to libwebrtc/ so CMake skips file(ARCHIVE_EXTRACT)..."
-            $tempExtract = Join-Path $realThirdParty ".extract_tmp"
+            Write-Host "Pre-extracting libwebrtc to libwebrtc/ ..."
+            $tempExtract = Join-Path $thirdParty ".extract_tmp"
             if (Test-Path $tempExtract) { Remove-Item -Recurse -Force $tempExtract }
             New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
             Expand-Archive -Path $zipPath -DestinationPath $tempExtract
             $entries = Get-ChildItem $tempExtract
-            Write-Host "Extracted entries: $($entries.Count)"
-            $entries | ForEach-Object { Write-Host "  - $($_.Name) (dir=$($_.PSIsContainer))" }
             if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) {
-              # Single top-level dir -> rename it to libwebrtc (mirrors CMake's file(RENAME))
               Rename-Item -Path (Join-Path $tempExtract $entries[0].Name) -NewName "libwebrtc"
             } else {
-              # Multiple entries -> wrap them under libwebrtc/
               New-Item -ItemType Directory -Force -Path $libwebrtcDir | Out-Null
               Get-ChildItem $tempExtract | Move-Item -Destination $libwebrtcDir
             }
@@ -71,12 +82,12 @@ jobs:
           }
 
           Write-Host "=== third_party contents ==="
-          Get-ChildItem $realThirdParty | Format-Table -AutoSize
+          Get-ChildItem $thirdParty | Format-Table -AutoSize
           if (Test-Path $libwebrtcDir) {
             Write-Host "=== libwebrtc contents ==="
             Get-ChildItem $libwebrtcDir | Format-Table -AutoSize
             if (Test-Path (Join-Path $libwebrtcDir "include")) {
-              Write-Host "=== libwebrtc/include ==="
+              Write-Host "=== libwebrtc/include (first 20) ==="
               Get-ChildItem (Join-Path $libwebrtcDir "include") | Select-Object -First 20 | Format-Table -AutoSize
             }
           }
