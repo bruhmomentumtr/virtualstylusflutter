@@ -36,8 +36,10 @@ bool FlutterWindow::OnCreate() {
   // Initialize Synthetic Pointer Devices (pen + touch).
   // Each synthetic device has its own pointer type, which lets the Windows
   // input stack deliver distinct WM_POINTERUPDATE messages for finger vs pen.
+  // The touch device supports up to 16 simultaneous contacts so the receiver
+  // can forward multi-touch from the tablet to Windows.
   pointer_device_ = CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT);
-  touch_device_  = CreateSyntheticPointerDevice(PT_TOUCH, 1, POINTER_FEEDBACK_DEFAULT);
+  touch_device_  = CreateSyntheticPointerDevice(PT_TOUCH, 16, POINTER_FEEDBACK_DEFAULT);
 
   // Setup Method Channel for Pen Injection
   flutter::MethodChannel<> channel(
@@ -64,6 +66,18 @@ bool FlutterWindow::OnCreate() {
           double x = getDouble(args->at(flutter::EncodableValue("x")));
           double y = getDouble(args->at(flutter::EncodableValue("y")));
           double pressure = getDouble(args->at(flutter::EncodableValue("pressure")));
+
+          // Pointer ID from the wire (1..16). Defaults to 1 so older clients
+          // (that don't send "pointerId") still work and the pen keeps using
+          // id 1.
+          int pointerId = 1;
+          auto pidIt = args->find(flutter::EncodableValue("pointerId"));
+          if (pidIt != args->end()) {
+            const auto* pidVal = std::get_if<int>(&pidIt->second);
+            if (pidVal && *pidVal >= 1 && *pidVal <= 16) {
+              pointerId = *pidVal;
+            }
+          }
 
           // Handle Shortcuts (action == 5)
           if (action == 5) {
@@ -131,7 +145,7 @@ bool FlutterWindow::OnCreate() {
             target_device = touch_device_;
             pointerInfo.type = PT_TOUCH;
             pointerInfo.touchInfo.pointerInfo.pointerType = PT_TOUCH;
-            pointerInfo.touchInfo.pointerInfo.pointerId = 1;
+            pointerInfo.touchInfo.pointerInfo.pointerId = pointerId;
             pointerInfo.touchInfo.touchFlags = TOUCH_FLAG_NONE;
             pointerInfo.touchInfo.touchMask = TOUCH_MASK_CONTACTAREA;
             pointerInfo.touchInfo.rcContact.left = 0;

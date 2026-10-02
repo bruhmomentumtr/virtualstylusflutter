@@ -70,6 +70,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         'x': event.x,
         'y': event.y,
         'pressure': event.pressure,
+        'pointerId': event.pointerId,
       });
     } catch (e) {
       debugPrint("Failed to inject event: $e");

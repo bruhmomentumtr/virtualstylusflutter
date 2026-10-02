@@ -9,6 +9,7 @@ class StylusEvent {
   final double x;
   final double y;
   final double pressure;
+  final int pointerId;
 
   StylusEvent({
     required this.action,
@@ -16,15 +17,17 @@ class StylusEvent {
     required this.x,
     required this.y,
     required this.pressure,
+    this.pointerId = 1,
   });
 
   Uint8List toBytes() {
-    final data = ByteData(14);
+    final data = ByteData(18);
     data.setUint8(0, action.index);
     data.setUint8(1, kind.index);
     data.setFloat32(2, x, Endian.little);
     data.setFloat32(6, y, Endian.little);
     data.setFloat32(10, pressure, Endian.little);
+    data.setUint32(14, pointerId, Endian.little);
     return data.buffer.asUint8List();
   }
 
@@ -33,12 +36,18 @@ class StylusEvent {
       throw const FormatException("Invalid byte length for StylusEvent");
     }
     final data = ByteData.sublistView(bytes);
+    int pointerId = 1;
+    if (bytes.length >= 18) {
+      pointerId = data.getUint32(14, Endian.little);
+      if (pointerId <= 0 || pointerId > 16) pointerId = 1;
+    }
     return StylusEvent(
       action: EventAction.values[data.getUint8(0)],
       kind: PointerKind.values[data.getUint8(1)],
       x: data.getFloat32(2, Endian.little),
       y: data.getFloat32(6, Endian.little),
       pressure: data.getFloat32(10, Endian.little),
+      pointerId: pointerId,
     );
   }
 }

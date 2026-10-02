@@ -259,12 +259,16 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     if (event.kind == PointerDeviceKind.invertedStylus) kind = PointerKind.invertedStylus;
     if (event.kind == PointerDeviceKind.mouse) kind = PointerKind.mouse;
 
+    int pointerId = (event.pointer % 16) + 1;
+    if (pointerId <= 0) pointerId = 1;
+
     final stylusEvent = StylusEvent(
       action: action,
       kind: kind,
       x: x,
       y: y,
       pressure: event.pressure,
+      pointerId: pointerId,
     );
 
     _client!.sendEvent(stylusEvent);
