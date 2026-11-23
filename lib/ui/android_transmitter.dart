@@ -63,11 +63,45 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     ShortcutItem(label: 'Redo', icon: Icons.redo, vkCode: 89, modifiers: 1), // Y + Ctrl
   ];
 
+  // Multi-touch slot management (1..16) to prevent modulo collisions and
+  // synchronize active finger bitmask across UDP packets.
+  static const int _maxTouchContacts = 16;
+  final Map<int, int> _activeTouchSlots = <int, int>{};
+  int _touchSequence = 0;
+
   // WebRTC
   bool _mirrorScreen = true;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+
+  int? _allocateTouchSlot(int flutterPointer) {
+    final existing = _activeTouchSlots[flutterPointer];
+    if (existing != null) return existing;
+    final usedSlots = _activeTouchSlots.values.toSet();
+    for (int slot = 1; slot <= _maxTouchContacts; slot++) {
+      if (!usedSlots.contains(slot)) {
+        _activeTouchSlots[flutterPointer] = slot;
+        return slot;
+      }
+    }
+    return null;
+  }
+
+  int _computeActiveTouchMask() {
+    int mask = 0;
+    for (final slot in _activeTouchSlots.values) {
+      if (slot >= 1 && slot <= _maxTouchContacts) {
+        mask |= 1 << (slot - 1);
+      }
+    }
+    return mask;
+  }
+
+  int _nextTouchSequence() {
+    _touchSequence = (_touchSequence + 1) & 0xFFFF;
+    return _touchSequence;
+  }
 
   @override
   void initState() {
@@ -100,6 +134,9 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   void _connect([String? ipAddr]) async {
     final ip = ipAddr ?? _ipController.text.trim();
     if (ip.isEmpty) return;
+
+    _activeTouchSlots.clear();
+    _touchSequence = 0;
 
     // Connect UDP for Stylus Data
     _client?.dispose();
@@ -202,6 +239,25 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   }
 
   void _disconnect() {
+    if (_client != null && _activeTouchSlots.isNotEmpty) {
+      final activeSlots = _activeTouchSlots.values.toList();
+      _activeTouchSlots.clear();
+      for (final slot in activeSlots) {
+        final cancelEvent = StylusEvent(
+          action: EventAction.cancel,
+          kind: PointerKind.touch,
+          x: 0.0,
+          y: 0.0,
+          pressure: 0.0,
+          pointerId: slot,
+          activeTouchMask: 0,
+          sequence: _nextTouchSequence(),
+        );
+        _client!.sendEvent(cancelEvent);
+      }
+    }
+    _activeTouchSlots.clear();
+    _touchSequence = 0;
     _client?.dispose();
     _closeWebRtc();
     setState(() {
@@ -259,8 +315,27 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     if (event.kind == PointerDeviceKind.invertedStylus) kind = PointerKind.invertedStylus;
     if (event.kind == PointerDeviceKind.mouse) kind = PointerKind.mouse;
 
-    int pointerId = (event.pointer % 16) + 1;
-    if (pointerId <= 0) pointerId = 1;
+    int pointerId = 1;
+    int activeMask = _computeActiveTouchMask();
+    int sequence = -1;
+
+    if (kind == PointerKind.touch) {
+      if (action == EventAction.hover) return;
+
+      int? slot;
+      if (action == EventAction.down) {
+        slot = _allocateTouchSlot(event.pointer);
+      } else if (action == EventAction.move) {
+        slot = _activeTouchSlots[event.pointer] ?? _allocateTouchSlot(event.pointer);
+      } else if (action == EventAction.up || action == EventAction.cancel) {
+        slot = _activeTouchSlots.remove(event.pointer);
+      }
+
+      if (slot == null) return;
+      pointerId = slot;
+      activeMask = _computeActiveTouchMask();
+      sequence = _nextTouchSequence();
+    }
 
     final stylusEvent = StylusEvent(
       action: action,
@@ -269,9 +344,19 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       y: y,
       pressure: event.pressure,
       pointerId: pointerId,
+      activeTouchMask: activeMask,
+      sequence: sequence,
     );
 
     _client!.sendEvent(stylusEvent);
+
+    // When lifting the last active finger, send one redundant copy so a single
+    // dropped UDP packet cannot leave a stuck touch contact on Windows.
+    if (kind == PointerKind.touch &&
+        (action == EventAction.up || action == EventAction.cancel) &&
+        activeMask == 0) {
+      _client!.sendEvent(stylusEvent);
+    }
   }
 
   void _sendShortcut(ShortcutItem item) {

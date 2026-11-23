@@ -19,13 +19,15 @@ class UdpServer {
 
     _socket?.listen((RawSocketEvent event) {
       if (event == RawSocketEvent.read) {
-        Datagram? datagram = _socket?.receive();
-        if (datagram != null) {
+        while (true) {
+          final Datagram? datagram = _socket?.receive();
+          if (datagram == null) break;
+
           // IP Filtering for Security (Anti-Multi-Device)
           if (lockedIp != null && datagram.address.address != lockedIp) {
-            return; // Ignore packets from unauthorized devices
+            continue; // Ignore packets from unauthorized devices
           }
-          
+
           try {
             final stylusEvent = StylusEvent.fromBytes(datagram.data);
             _eventStreamController.add(stylusEvent);

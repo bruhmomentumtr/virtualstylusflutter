@@ -71,9 +71,19 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         'y': event.y,
         'pressure': event.pressure,
         'pointerId': event.pointerId,
+        'activeTouchMask': event.activeTouchMask,
+        'sequence': event.sequence,
       });
     } catch (e) {
       debugPrint("Failed to inject event: $e");
+    }
+  }
+
+  Future<void> _clearTouches() async {
+    try {
+      await _channel.invokeMethod('clearTouches');
+    } catch (e) {
+      debugPrint("Failed to clear touches: $e");
     }
   }
 
@@ -93,6 +103,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     _signaler = WebRtcSignaler(
       port: 4001,
       onConnect: (ip) {
+        _clearTouches();
         setState(() {
           _connectedIp = ip;
         });
@@ -100,6 +111,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         _setupWebRtcAndSendOffer();
       },
       onDisconnect: () {
+        _clearTouches();
         setState(() {
           _connectedIp = null;
         });
@@ -205,6 +217,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
 
   @override
   void dispose() {
+    _clearTouches();
     _stopSignalingServer();
     _server.stop();
     super.dispose();

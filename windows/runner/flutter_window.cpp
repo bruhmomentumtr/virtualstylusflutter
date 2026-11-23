@@ -1,15 +1,309 @@
 #include "flutter_window.h"
 
+#include <algorithm>
 #include <optional>
+#include <vector>
 
 #include "flutter/generated_plugin_registrant.h"
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
 #include <iostream>
+
+namespace {
+
+constexpr DWORD kTouchDownFlags =
+    POINTER_FLAG_NEW | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT |
+    POINTER_FLAG_DOWN;
+constexpr DWORD kTouchUpdateFlags =
+    POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
+constexpr DWORD kTouchUpFlags = POINTER_FLAG_UP;
+constexpr DWORD kTouchCancelFlags = POINTER_FLAG_UP | POINTER_FLAG_CANCELED;
+
+bool IsSeqNewer(uint16_t candidate, uint16_t baseline) {
+  return static_cast<int16_t>(static_cast<uint16_t>(candidate - baseline)) > 0;
+}
+
+bool ContainsSlot(const std::vector<int>& slots, int target) {
+  return std::find(slots.begin(), slots.end(), target) != slots.end();
+}
+
+}  // namespace
+
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
 FlutterWindow::~FlutterWindow() {}
+
+POINTER_TYPE_INFO FlutterWindow::MakeTouchPointerInfo(int slot,
+                                                      LONG x,
+                                                      LONG y,
+                                                      DWORD flags,
+                                                      LONG screen_width,
+                                                      LONG screen_height) {
+  POINTER_TYPE_INFO info = {};
+  info.type = PT_TOUCH;
+  info.touchInfo.pointerInfo.pointerType = PT_TOUCH;
+  // CreateSyntheticPointerDevice(PT_TOUCH, kMaxTouchContacts, ...) uses
+  // zero-based contact IDs in [0, kMaxTouchContacts - 1].
+  info.touchInfo.pointerInfo.pointerId = static_cast<UINT32>(slot - 1);
+  info.touchInfo.pointerInfo.pointerFlags = flags;
+  info.touchInfo.pointerInfo.ptPixelLocation.x = x;
+  info.touchInfo.pointerInfo.ptPixelLocation.y = y;
+
+  info.touchInfo.touchFlags = TOUCH_FLAG_NONE;
+  info.touchInfo.touchMask = TOUCH_MASK_CONTACTAREA;
+  constexpr LONG kContactRadius = 2;
+  LONG left = (std::max)(LONG{0}, x - kContactRadius);
+  LONG top = (std::max)(LONG{0}, y - kContactRadius);
+  LONG right = (std::min)(screen_width, x + kContactRadius);
+  LONG bottom = (std::min)(screen_height, y + kContactRadius);
+  if (right <= left) right = left + 1;
+  if (bottom <= top) bottom = top + 1;
+  info.touchInfo.rcContact.left = left;
+  info.touchInfo.rcContact.top = top;
+  info.touchInfo.rcContact.right = right;
+  info.touchInfo.rcContact.bottom = bottom;
+  return info;
+}
+
+bool FlutterWindow::HandleTouchEvent(int action,
+                                     int slot,
+                                     LONG x,
+                                     LONG y,
+                                     int active_touch_mask,
+                                     int sequence,
+                                     LONG screen_width,
+                                     LONG screen_height) {
+  if (touch_device_ == nullptr) {
+    return false;
+  }
+  if (slot < 1 || slot > kMaxTouchContacts) {
+    return false;
+  }
+  if (action == 4) {
+    // Finger touch does not hover; ignore safely.
+    return true;
+  }
+
+  const ULONGLONG now_tick = GetTickCount64();
+  if (active_touches_.empty() && has_touch_seq_ &&
+      (now_tick - last_touch_tick_) > 2000) {
+    // Reset sequence baseline after idle gap so client reconnects (even with
+    // WebRTC signaling disabled) immediately synchronize.
+    has_touch_seq_ = false;
+  }
+  last_touch_tick_ = now_tick;
+
+  const bool has_seq = (sequence >= 0 && sequence <= 0xFFFF);
+  const uint16_t seq16 = has_seq ? static_cast<uint16_t>(sequence) : uint16_t{0};
+  const bool seq_is_newer =
+      !has_seq || !has_touch_seq_ || IsSeqNewer(seq16, last_touch_seq_);
+  if (has_seq && seq_is_newer) {
+    last_touch_seq_ = seq16;
+    has_touch_seq_ = true;
+  }
+
+  // Reconcile any contacts whose UP packet was dropped over UDP using the
+  // sender's activeTouchMask (only when this packet is not older than the
+  // latest sequence we already processed).
+  std::vector<int> stale_slots;
+  if (active_touch_mask >= 0 && seq_is_newer) {
+    for (const auto& entry : active_touches_) {
+      const int existing_slot = entry.first;
+      if (existing_slot == slot) continue;
+      if (((active_touch_mask >> (existing_slot - 1)) & 1) == 0) {
+        stale_slots.push_back(existing_slot);
+      }
+    }
+  }
+
+  auto erase_stale = [&]() {
+    for (int stale : stale_slots) {
+      active_touches_.erase(stale);
+    }
+  };
+
+  // Action 2 = Up, Action 3 = Cancel
+  if (action == 2 || action == 3) {
+    auto it = active_touches_.find(slot);
+    bool release_slot = (it != active_touches_.end());
+    if (release_slot && has_seq && it->second.has_seq &&
+        !IsSeqNewer(seq16, it->second.last_seq)) {
+      // Delayed duplicate UP/CANCEL from an older tap after this slot was
+      // already reused by a newer DOWN. Do not lift the new contact.
+      release_slot = false;
+    }
+
+    if (!release_slot && stale_slots.empty()) {
+      return true;
+    }
+
+    const DWORD release_flags =
+        (action == 3) ? kTouchCancelFlags : kTouchUpFlags;
+    std::vector<POINTER_TYPE_INFO> frame;
+    frame.reserve(active_touches_.size());
+    for (const auto& entry : active_touches_) {
+      const int id = entry.first;
+      const TouchContact& contact = entry.second;
+      DWORD flags = kTouchUpdateFlags;
+      if (release_slot && id == slot) {
+        flags = release_flags;
+      } else if (ContainsSlot(stale_slots, id)) {
+        flags = kTouchUpFlags;
+      }
+      // On UP/CANCEL Windows requires ptPixelLocation to match the last
+      // reported contact position.
+      frame.push_back(MakeTouchPointerInfo(
+          id, contact.x, contact.y, flags, screen_width, screen_height));
+    }
+
+    BOOL ok = InjectSyntheticPointerInput(
+        touch_device_, frame.data(), static_cast<UINT32>(frame.size()));
+    if (!ok && action == 3 && release_slot) {
+      // Fallback to plain POINTER_FLAG_UP if CANCELED is rejected.
+      for (auto& pti : frame) {
+        if (pti.touchInfo.pointerInfo.pointerId ==
+            static_cast<UINT32>(slot - 1)) {
+          pti.touchInfo.pointerInfo.pointerFlags = kTouchUpFlags;
+        }
+      }
+      ok = InjectSyntheticPointerInput(
+          touch_device_, frame.data(), static_cast<UINT32>(frame.size()));
+    }
+
+    if (release_slot) {
+      active_touches_.erase(slot);
+    }
+    erase_stale();
+    return ok != FALSE;
+  }
+
+  // Action 0 = Down, Action 1 = Move
+  auto existing_it = active_touches_.find(slot);
+  const bool already_active = (existing_it != active_touches_.end());
+
+  if (action == 1 && !already_active) {
+    if (has_seq && !seq_is_newer) {
+      // Out-of-order MOVE arrived after this finger was already lifted.
+      return true;
+    }
+    // Missed DOWN packet over UDP; promote this MOVE to DOWN so the finger
+    // starts cleanly.
+    action = 0;
+  }
+
+  if (action == 1 && already_active) {
+    if (has_seq && existing_it->second.has_seq &&
+        !IsSeqNewer(seq16, existing_it->second.last_seq)) {
+      // Out-of-order older MOVE for this same finger; drop to prevent jitter.
+      return true;
+    }
+    existing_it->second.x = x;
+    existing_it->second.y = y;
+    if (has_seq) {
+      existing_it->second.last_seq = seq16;
+      existing_it->second.has_seq = true;
+    }
+
+    std::vector<POINTER_TYPE_INFO> frame;
+    frame.reserve(active_touches_.size());
+    for (const auto& entry : active_touches_) {
+      const int id = entry.first;
+      const TouchContact& contact = entry.second;
+      const DWORD flags = ContainsSlot(stale_slots, id)
+                              ? kTouchUpFlags
+                              : kTouchUpdateFlags;
+      frame.push_back(MakeTouchPointerInfo(
+          id, contact.x, contact.y, flags, screen_width, screen_height));
+    }
+
+    BOOL ok = InjectSyntheticPointerInput(
+        touch_device_, frame.data(), static_cast<UINT32>(frame.size()));
+    erase_stale();
+    return ok != FALSE;
+  }
+
+  // Action 0 = Down
+  if (already_active) {
+    if (has_seq && existing_it->second.has_seq &&
+        !IsSeqNewer(seq16, existing_it->second.last_seq)) {
+      // Duplicate/reordered older DOWN; ignore.
+      return true;
+    }
+    // Previous UP for this slot was lost; release the stale contact first
+    // while keeping all other active fingers down.
+    std::vector<POINTER_TYPE_INFO> release_frame;
+    release_frame.reserve(active_touches_.size());
+    for (const auto& entry : active_touches_) {
+      const int id = entry.first;
+      const TouchContact& contact = entry.second;
+      const DWORD flags = (id == slot || ContainsSlot(stale_slots, id))
+                              ? kTouchUpFlags
+                              : kTouchUpdateFlags;
+      release_frame.push_back(MakeTouchPointerInfo(
+          id, contact.x, contact.y, flags, screen_width, screen_height));
+    }
+    InjectSyntheticPointerInput(
+        touch_device_, release_frame.data(),
+        static_cast<UINT32>(release_frame.size()));
+    active_touches_.erase(slot);
+    erase_stale();
+    stale_slots.clear();
+  }
+
+  TouchContact new_contact;
+  new_contact.x = x;
+  new_contact.y = y;
+  new_contact.last_seq = seq16;
+  new_contact.has_seq = has_seq;
+  active_touches_[slot] = new_contact;
+
+  std::vector<POINTER_TYPE_INFO> frame;
+  frame.reserve(active_touches_.size());
+  for (const auto& entry : active_touches_) {
+    const int id = entry.first;
+    const TouchContact& contact = entry.second;
+    DWORD flags = kTouchUpdateFlags;
+    if (id == slot) {
+      flags = kTouchDownFlags;
+    } else if (ContainsSlot(stale_slots, id)) {
+      flags = kTouchUpFlags;
+    }
+    frame.push_back(MakeTouchPointerInfo(
+        id, contact.x, contact.y, flags, screen_width, screen_height));
+  }
+
+  BOOL ok = InjectSyntheticPointerInput(
+      touch_device_, frame.data(), static_cast<UINT32>(frame.size()));
+  erase_stale();
+  if (!ok) {
+    active_touches_.erase(slot);
+  }
+  return ok != FALSE;
+}
+
+void FlutterWindow::ClearAllTouches() {
+  if (touch_device_ != nullptr && !active_touches_.empty()) {
+    LONG screen_width = static_cast<LONG>(GetSystemMetrics(SM_CXSCREEN));
+    LONG screen_height = static_cast<LONG>(GetSystemMetrics(SM_CYSCREEN));
+    if (screen_width <= 0) screen_width = 1920;
+    if (screen_height <= 0) screen_height = 1080;
+
+    std::vector<POINTER_TYPE_INFO> frame;
+    frame.reserve(active_touches_.size());
+    for (const auto& entry : active_touches_) {
+      frame.push_back(MakeTouchPointerInfo(
+          entry.first, entry.second.x, entry.second.y, kTouchUpFlags,
+          screen_width, screen_height));
+    }
+    InjectSyntheticPointerInput(
+        touch_device_, frame.data(), static_cast<UINT32>(frame.size()));
+  }
+  active_touches_.clear();
+  has_touch_seq_ = false;
+  last_touch_seq_ = 0;
+  last_touch_tick_ = 0;
+}
 
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
@@ -49,6 +343,11 @@ bool FlutterWindow::OnCreate() {
   channel.SetMethodCallHandler(
       [this](const flutter::MethodCall<>& call,
              std::unique_ptr<flutter::MethodResult<>> result) {
+        if (call.method_name() == "clearTouches") {
+          ClearAllTouches();
+          result->Success();
+          return;
+        }
         if (call.method_name() == "injectPenEvent") {
           const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
           if (!args) {
@@ -62,7 +361,16 @@ bool FlutterWindow::OnCreate() {
             return 0.0;
           };
 
-          int action = std::get<int>(args->at(flutter::EncodableValue("action")));
+          auto getOptionalInt = [&](const char* key, int default_val) -> int {
+            auto it = args->find(flutter::EncodableValue(key));
+            if (it != args->end()) {
+              const auto* val = std::get_if<int>(&it->second);
+              if (val) return *val;
+            }
+            return default_val;
+          };
+
+          int action = getOptionalInt("action", 1);
           double x = getDouble(args->at(flutter::EncodableValue("x")));
           double y = getDouble(args->at(flutter::EncodableValue("y")));
           double pressure = getDouble(args->at(flutter::EncodableValue("pressure")));
@@ -70,20 +378,19 @@ bool FlutterWindow::OnCreate() {
           // Pointer ID from the wire (1..16). Defaults to 1 so older clients
           // (that don't send "pointerId") still work and the pen keeps using
           // id 1.
-          int pointerId = 1;
-          auto pidIt = args->find(flutter::EncodableValue("pointerId"));
-          if (pidIt != args->end()) {
-            const auto* pidVal = std::get_if<int>(&pidIt->second);
-            if (pidVal && *pidVal >= 1 && *pidVal <= 16) {
-              pointerId = *pidVal;
-            }
+          int pointerId = getOptionalInt("pointerId", 1);
+          if (pointerId < 1 || pointerId > kMaxTouchContacts) {
+            pointerId = 1;
           }
+
+          int activeTouchMask = getOptionalInt("activeTouchMask", -1);
+          int sequence = getOptionalInt("sequence", -1);
 
           // Handle Shortcuts (action == 5)
           if (action == 5) {
             int vkCode = static_cast<int>(x);
             int modifiers = static_cast<int>(y);
-            
+
             bool ctrl = (modifiers & 1) != 0;
             bool shift = (modifiers & 2) != 0;
             bool alt = (modifiers & 4) != 0;
@@ -120,96 +427,80 @@ bool FlutterWindow::OnCreate() {
 
           // Pointer kind from the wire: 0=touch, 1=stylus, 2=invertedStylus, 3=mouse.
           // Defaults to stylus so older clients (that don't send "kind") still work.
-          int kind = 1;
-          auto kindIt = args->find(flutter::EncodableValue("kind"));
-          if (kindIt != args->end()) {
-            const auto* kindVal = std::get_if<int>(&kindIt->second);
-            if (kindVal) kind = *kindVal;
-          }
+          int kind = getOptionalInt("kind", 1);
 
-          int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-          int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+          LONG screenWidth = static_cast<LONG>(GetSystemMetrics(SM_CXSCREEN));
+          LONG screenHeight = static_cast<LONG>(GetSystemMetrics(SM_CYSCREEN));
+          if (screenWidth <= 0) screenWidth = 1920;
+          if (screenHeight <= 0) screenHeight = 1080;
 
-          POINTER_TYPE_INFO pointerInfo = {};
-          HSYNTHETICPOINTERDEVICE target_device = nullptr;
+          LONG px = std::clamp(
+              static_cast<LONG>(x * static_cast<double>(screenWidth)),
+              LONG{0},
+              (std::max)(LONG{0}, screenWidth - 1));
+          LONG py = std::clamp(
+              static_cast<LONG>(y * static_cast<double>(screenHeight)),
+              LONG{0},
+              (std::max)(LONG{0}, screenHeight - 1));
 
-          // Pick the matching synthetic device and pre-fill its sub-struct.
-          // The struct is a union (touchInfo | penInfo | mouseInfo), so the
-          // "common" pointerInfo fields must be written through the active
-          // member — the helpers below do that routing.
-          if (kind == 0) { // touch
+          // Multi-touch path: inject all active contacts together in one frame.
+          if (kind == 0) {
             if (touch_device_ == nullptr) {
               result->Error("NO_DEVICE", "Synthetic touch device not created");
               return;
             }
-            target_device = touch_device_;
-            pointerInfo.type = PT_TOUCH;
-            pointerInfo.touchInfo.pointerInfo.pointerType = PT_TOUCH;
-            pointerInfo.touchInfo.pointerInfo.pointerId = pointerId;
-            pointerInfo.touchInfo.touchFlags = TOUCH_FLAG_NONE;
-            pointerInfo.touchInfo.touchMask = TOUCH_MASK_CONTACTAREA;
-            pointerInfo.touchInfo.rcContact.left = 0;
-            pointerInfo.touchInfo.rcContact.top = 0;
-            pointerInfo.touchInfo.rcContact.right = 4;
-            pointerInfo.touchInfo.rcContact.bottom = 4;
-          } else { // stylus, invertedStylus, or mouse all go through pen
-            if (pointer_device_ == nullptr) {
-              result->Error("NO_DEVICE", "Synthetic pen device not created");
-              return;
+            bool ok = HandleTouchEvent(
+                action, pointerId, px, py, activeTouchMask, sequence,
+                screenWidth, screenHeight);
+            if (ok) {
+              result->Success();
+            } else {
+              result->Error("INJECT_FAILED", "Failed to inject touch input");
             }
-            target_device = pointer_device_;
-            pointerInfo.type = PT_PEN;
-            pointerInfo.penInfo.pointerInfo.pointerType = PT_PEN;
-            pointerInfo.penInfo.pointerInfo.pointerId = 1;
-            pointerInfo.penInfo.penFlags = PEN_FLAG_NONE;
-            pointerInfo.penInfo.penMask = PEN_MASK_PRESSURE;
+            return;
           }
 
-          auto applyFlags = [&](DWORD flags) {
-            if (kind == 0) {
-              pointerInfo.touchInfo.pointerInfo.pointerFlags = flags;
-            } else {
-              pointerInfo.penInfo.pointerInfo.pointerFlags = flags;
-            }
-          };
-          auto applyLocation = [&](double lx, double ly) {
-            LONG px = static_cast<LONG>(lx * screenWidth);
-            LONG py = static_cast<LONG>(ly * screenHeight);
-            if (kind == 0) {
-              pointerInfo.touchInfo.pointerInfo.ptPixelLocation.x = px;
-              pointerInfo.touchInfo.pointerInfo.ptPixelLocation.y = py;
-            } else {
-              pointerInfo.penInfo.pointerInfo.ptPixelLocation.x = px;
-              pointerInfo.penInfo.pointerInfo.ptPixelLocation.y = py;
-            }
-          };
+          // If switching to pen/stylus and Android reports no active fingers,
+          // release any lingering touch contacts cleanly.
+          if (activeTouchMask == 0 && !active_touches_.empty()) {
+            ClearAllTouches();
+          }
 
-          // Action mapping
-          // 0: Down, 1: Move, 2: Up, 3: Cancel, 4: Hover
+          // Pen / stylus / mouse path (single contact via PT_PEN).
+          if (pointer_device_ == nullptr) {
+            result->Error("NO_DEVICE", "Synthetic pen device not created");
+            return;
+          }
+
+          POINTER_TYPE_INFO pointerInfo = {};
+          pointerInfo.type = PT_PEN;
+          pointerInfo.penInfo.pointerInfo.pointerType = PT_PEN;
+          pointerInfo.penInfo.pointerInfo.pointerId = 1;
+          pointerInfo.penInfo.pointerInfo.ptPixelLocation.x = px;
+          pointerInfo.penInfo.pointerInfo.ptPixelLocation.y = py;
+          pointerInfo.penInfo.penFlags = PEN_FLAG_NONE;
+          pointerInfo.penInfo.penMask = PEN_MASK_PRESSURE;
+          pointerInfo.penInfo.pressure = static_cast<UINT32>(
+              std::clamp(pressure, 0.0, 1.0) * 1024.0);
+
+          // Action mapping: 0=Down, 1=Move, 2=Up, 3=Cancel, 4=Hover
           if (action == 0) {
-            if (kind == 0) { // touch down needs POINTER_FLAG_NEW
-              applyFlags(POINTER_FLAG_NEW | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN);
-            } else {
-              applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN);
-            }
+            pointerInfo.penInfo.pointerInfo.pointerFlags =
+                POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN;
           } else if (action == 1) {
-            applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE);
+            pointerInfo.penInfo.pointerInfo.pointerFlags =
+                POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
           } else if (action == 2) {
-            applyFlags(POINTER_FLAG_UP);
-          } else if (action == 4) { // hover
-            applyFlags(POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE);
-          } else { // cancel
-            applyFlags(POINTER_FLAG_UPDATE);
+            pointerInfo.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+          } else if (action == 4) {
+            pointerInfo.penInfo.pointerInfo.pointerFlags =
+                POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE;
+          } else {
+            pointerInfo.penInfo.pointerInfo.pointerFlags =
+                POINTER_FLAG_UP | POINTER_FLAG_CANCELED;
           }
 
-          applyLocation(x, y);
-
-          // Pressure is pen-only; touch input never reports pressure.
-          if (kind != 0) {
-            pointerInfo.penInfo.pressure = static_cast<UINT32>(pressure * 1024);
-          }
-
-          BOOL success = InjectSyntheticPointerInput(target_device, &pointerInfo, 1);
+          BOOL success = InjectSyntheticPointerInput(pointer_device_, &pointerInfo, 1);
           if (success) {
             result->Success();
           } else {
@@ -229,6 +520,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  ClearAllTouches();
   if (pointer_device_ != nullptr) {
     DestroySyntheticPointerDevice(pointer_device_);
     pointer_device_ = nullptr;
