@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../core/network/udp_client.dart';
 import '../core/network/stylus_event.dart';
 import '../core/network/webrtc_signaler.dart';
+import '../core/network/stream_quality.dart';
 
 class ShortcutItem {
   final String label;
@@ -71,6 +72,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
   // WebRTC
   bool _mirrorScreen = true;
+  StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -115,6 +117,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     setState(() {
       _shortcutsOnLeft = prefs.getBool('shortcutsOnLeft') ?? true;
       _mirrorScreen = prefs.getBool('mirrorScreen') ?? true;
+      _qualityMode = streamQualityModeFromName(prefs.getString('streamQualityMode'));
       final savedShortcuts = prefs.getString('shortcuts');
       if (savedShortcuts != null) {
         final List decoded = jsonDecode(savedShortcuts);
@@ -127,8 +130,22 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('shortcutsOnLeft', _shortcutsOnLeft);
     await prefs.setBool('mirrorScreen', _mirrorScreen);
+    await prefs.setString('streamQualityMode', _qualityMode.name);
     final encoded = jsonEncode(_shortcuts.map((e) => e.toMap()).toList());
     await prefs.setString('shortcuts', encoded);
+  }
+
+  void _setQualityMode(StreamQualityMode mode, {bool notifyPeer = true}) {
+    setState(() {
+      _qualityMode = mode;
+    });
+    _savePrefs();
+    if (notifyPeer) {
+      _signaler?.sendMessage({
+        'type': 'quality_mode',
+        'mode': mode.name,
+      });
+    }
   }
 
   void _connect([String? ipAddr]) async {
@@ -157,6 +174,12 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   Future<void> _startWebRtcSignaling(String targetIp) async {
     _signaler = WebRtcSignaler(
       port: 4001,
+      onConnect: (_) {
+        _signaler?.sendMessage({
+          'type': 'quality_mode',
+          'mode': _qualityMode.name,
+        });
+      },
       onMessage: _handleSignalingMessage,
       onDisconnect: _closeWebRtc,
     );
@@ -168,7 +191,13 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
   void _handleSignalingMessage(Map<String, dynamic> message) async {
     final type = message['type'];
-    
+
+    if (type == 'quality_mode') {
+      final mode = streamQualityModeFromName(message['mode'] as String?);
+      _setQualityMode(mode, notifyPeer: false);
+      return;
+    }
+
     if (type == 'offer') {
       _isRemoteSet = false;
       _remoteCandidates.clear();
@@ -176,7 +205,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       final configuration = {
         "iceServers": []
       };
-      
+
       _peerConnection = await createPeerConnection(configuration);
 
       _peerConnection!.onIceCandidate = (candidate) {
@@ -205,14 +234,16 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(message['sdp'], type),
       );
-      
+
       _isRemoteSet = true;
       for (var cand in _remoteCandidates) {
         await _peerConnection!.addCandidate(cand);
       }
       _remoteCandidates.clear();
 
-      final answer = await _peerConnection!.createAnswer();
+      final rawAnswer = await _peerConnection!.createAnswer();
+      final optimizedSdp = optimizeVideoSdp(rawAnswer.sdp ?? '', _qualityMode);
+      final answer = RTCSessionDescription(optimizedSdp, rawAnswer.type);
       await _peerConnection!.setLocalDescription(answer);
 
       _signaler?.sendMessage({
@@ -533,35 +564,40 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                       final s = _shortcuts[index];
                       return Padding(
                         padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-                        child: InkWell(
-                          onLongPress: () {
-                            setState(() {
-                              _shortcuts.removeAt(index);
-                              _savePrefs();
-                            });
-                          },
+                        child: Material(
+                          color: Colors.transparent,
                           borderRadius: BorderRadius.circular(12),
-                          child: Tooltip(
-                            message: "Hold to delete",
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: Colors.white.withOpacity(0.05)),
-                              ),
-                              padding: const EdgeInsets.all(12),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(s.icon, color: Colors.white70, size: 24),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    s.label, 
-                                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
-                                    textAlign: TextAlign.center,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
+                          child: InkWell(
+                            onTap: () => _sendShortcut(s),
+                            onLongPress: () {
+                              setState(() {
+                                _shortcuts.removeAt(index);
+                                _savePrefs();
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(12),
+                            child: Tooltip(
+                              message: "Tap to send • Hold to delete",
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: Colors.white.withOpacity(0.05)),
+                                ),
+                                padding: const EdgeInsets.all(12),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(s.icon, color: Colors.white70, size: 24),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      s.label,
+                                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                                      textAlign: TextAlign.center,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
@@ -571,6 +607,55 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                   ),
                 ),
                 Divider(color: Colors.white.withOpacity(0.1), height: 20),
+                if (_mirrorScreen) ...[
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                    child: Material(
+                      color: Colors.transparent,
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        onTap: () => _setQualityMode(_qualityMode.next),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Tooltip(
+                          message: 'Stream: ${_qualityMode.config.label} (${_qualityMode.config.description})',
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.blueAccent.withOpacity(0.18),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.blueAccent.withOpacity(0.35)),
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _qualityMode == StreamQualityMode.performance
+                                      ? Icons.speed
+                                      : (_qualityMode == StreamQualityMode.quality
+                                          ? Icons.high_quality
+                                          : Icons.tune),
+                                  color: Colors.blueAccent,
+                                  size: 20,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _qualityMode.config.shortLabel,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 IconButton(
                   icon: const Icon(Icons.add_circle, color: Colors.blueAccent, size: 32),
                   onPressed: _addNewShortcut,
@@ -734,6 +819,60 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                       ),
                     ),
                   ),
+                  if (_mirrorScreen) ...[
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: 350,
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.03),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white.withOpacity(0.05)),
+                        ),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: StreamQualityMode.values.map((mode) {
+                                final selected = _qualityMode == mode;
+                                return Expanded(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                                    child: InkWell(
+                                      onTap: () => _setQualityMode(mode, notifyPeer: false),
+                                      borderRadius: BorderRadius.circular(12),
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 160),
+                                        padding: const EdgeInsets.symmetric(vertical: 10),
+                                        decoration: BoxDecoration(
+                                          color: selected ? Colors.blueAccent : Colors.transparent,
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                        child: Text(
+                                          mode.config.label,
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: selected ? Colors.white : Colors.white60,
+                                            fontSize: 13,
+                                            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              _qualityMode.config.description,
+                              style: const TextStyle(color: Colors.white38, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 40),
                   Row(
                     mainAxisSize: MainAxisSize.min,

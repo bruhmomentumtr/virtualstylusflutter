@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/network/udp_server.dart';
 import '../core/network/stylus_event.dart';
 import '../core/network/webrtc_signaler.dart';
+import '../core/network/stream_quality.dart';
 
 class WindowsReceiverScreen extends StatefulWidget {
   const WindowsReceiverScreen({super.key});
@@ -22,6 +24,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
 
   // WebRTC
   bool _enableScreenMirroring = true;
+  StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   String? _connectedIp;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
@@ -30,8 +33,46 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   @override
   void initState() {
     super.initState();
+    _loadPrefs();
     _initServer();
     _startSignalingServer();
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedMode = prefs.getString('streamQualityMode');
+    if (mounted) {
+      setState(() {
+        _qualityMode = streamQualityModeFromName(savedMode);
+      });
+    }
+  }
+
+  Future<void> _setQualityMode(
+    StreamQualityMode mode, {
+    bool notifyPeer = true,
+  }) async {
+    if (mounted) {
+      setState(() {
+        _qualityMode = mode;
+      });
+    } else {
+      _qualityMode = mode;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('streamQualityMode', mode.name);
+
+    if (_peerConnection != null) {
+      await applyVideoSenderParameters(_peerConnection!, mode);
+    }
+
+    if (notifyPeer && _connectedIp != null) {
+      _signaler?.sendMessage({
+        'type': 'quality_mode',
+        'mode': mode.name,
+      });
+    }
   }
 
   Future<void> _initServer() async {
@@ -153,22 +194,32 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       final sources = await desktopCapturer.getSources(types: [SourceType.Screen]);
       if (sources.isNotEmpty) {
         final source = sources.first; // primary monitor
+        final cfg = _qualityMode.config;
         final mediaConstraints = <String, dynamic>{
           'audio': false,
           'video': {
             'mandatory': {
               'chromeMediaSource': 'desktop',
               'chromeMediaSourceId': source.id,
-            }
+              'maxFrameRate': cfg.maxFramerate,
+            },
+            'frameRate': {
+              'ideal': cfg.maxFramerate,
+              'max': cfg.maxFramerate,
+            },
           }
         };
         _localStream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
-        
-        _localStream!.getTracks().forEach((track) {
-          _peerConnection!.addTrack(track, _localStream!);
-        });
 
-        RTCSessionDescription offer = await _peerConnection!.createOffer();
+        for (final track in _localStream!.getTracks()) {
+          await _peerConnection!.addTrack(track, _localStream!);
+        }
+
+        await applyVideoSenderParameters(_peerConnection!, _qualityMode);
+
+        final RTCSessionDescription rawOffer = await _peerConnection!.createOffer();
+        final optimizedSdp = optimizeVideoSdp(rawOffer.sdp ?? '', _qualityMode);
+        final offer = RTCSessionDescription(optimizedSdp, rawOffer.type);
         await _peerConnection!.setLocalDescription(offer);
 
         _signaler?.sendMessage({
@@ -185,18 +236,29 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   bool _isRemoteSet = false;
 
   void _handleSignalingMessage(Map<String, dynamic> message) async {
+    final type = message['type'];
+    if (type == 'quality_mode') {
+      final mode = streamQualityModeFromName(message['mode'] as String?);
+      await _setQualityMode(mode, notifyPeer: false);
+      return;
+    }
+
     if (_peerConnection == null) return;
 
-    final type = message['type'];
     if (type == 'answer') {
+      final optimizedAnswerSdp = optimizeVideoSdp(
+        (message['sdp'] as String?) ?? '',
+        _qualityMode,
+      );
       await _peerConnection!.setRemoteDescription(
-        RTCSessionDescription(message['sdp'], type),
+        RTCSessionDescription(optimizedAnswerSdp, type),
       );
       _isRemoteSet = true;
       for (var cand in _remoteCandidates) {
         await _peerConnection!.addCandidate(cand);
       }
       _remoteCandidates.clear();
+      await applyVideoSenderParameters(_peerConnection!, _qualityMode);
     } else if (type == 'candidate') {
       final cand = RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']);
       if (_isRemoteSet) {
@@ -356,6 +418,51 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                           ),
                         ],
                       ),
+                      if (_enableScreenMirroring) ...[
+                        const SizedBox(height: 16),
+                        Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.35),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: Colors.white.withOpacity(0.08)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: StreamQualityMode.values.map((mode) {
+                              final selected = _qualityMode == mode;
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 2),
+                                child: InkWell(
+                                  onTap: () => _setQualityMode(mode),
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 160),
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: selected ? Colors.blueAccent : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Text(
+                                      mode.config.label,
+                                      style: TextStyle(
+                                        color: selected ? Colors.white : Colors.white60,
+                                        fontSize: 13,
+                                        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _qualityMode.config.description,
+                          style: const TextStyle(color: Colors.white38, fontSize: 12),
+                        ),
+                      ],
                     ],
                   ),
                 ),
