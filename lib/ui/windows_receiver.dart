@@ -25,10 +25,17 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   // WebRTC
   bool _enableScreenMirroring = true;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
+  ManualStreamSettings _manualSettings = const ManualStreamSettings();
+  int _captureSourceHeight = 1080;
   String? _connectedIp;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+
+  StreamQualityConfig get _activeQualityConfig => _qualityMode.resolveConfig(
+        manual: _manualSettings,
+        sourceHeight: _captureSourceHeight,
+      );
 
   @override
   void initState() {
@@ -41,36 +48,52 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     final savedMode = prefs.getString('streamQualityMode');
+    final savedHeight = prefs.getInt('manualTargetHeight') ?? 1080;
+    final savedFps = prefs.getInt('manualFps') ?? 60;
+    final savedMbps = prefs.getInt('manualMaxMbps') ?? 15;
     if (mounted) {
       setState(() {
         _qualityMode = streamQualityModeFromName(savedMode);
+        _manualSettings = ManualStreamSettings(
+          targetHeight: savedHeight < 0 ? 0 : savedHeight,
+          fps: savedFps.clamp(15, 120),
+          maxMbps: savedMbps.clamp(2, 40),
+        );
       });
     }
   }
 
   Future<void> _setQualityMode(
     StreamQualityMode mode, {
+    ManualStreamSettings? manual,
     bool notifyPeer = true,
   }) async {
+    final nextManual = manual ?? _manualSettings;
     if (mounted) {
       setState(() {
         _qualityMode = mode;
+        _manualSettings = nextManual;
       });
     } else {
       _qualityMode = mode;
+      _manualSettings = nextManual;
     }
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('streamQualityMode', mode.name);
+    await prefs.setInt('manualTargetHeight', nextManual.targetHeight);
+    await prefs.setInt('manualFps', nextManual.fps);
+    await prefs.setInt('manualMaxMbps', nextManual.maxMbps);
 
     if (_peerConnection != null) {
-      await applyVideoSenderParameters(_peerConnection!, mode);
+      await applyVideoSenderParameters(_peerConnection!, _activeQualityConfig);
     }
 
     if (notifyPeer && _connectedIp != null) {
       _signaler?.sendMessage({
         'type': 'quality_mode',
         'mode': mode.name,
+        'manual': nextManual.toMap(),
       });
     }
   }
@@ -194,7 +217,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       final sources = await desktopCapturer.getSources(types: [SourceType.Screen]);
       if (sources.isNotEmpty) {
         final source = sources.first; // primary monitor
-        final cfg = _qualityMode.config;
+        final cfg = _activeQualityConfig;
         final mediaConstraints = <String, dynamic>{
           'audio': false,
           'video': {
@@ -211,14 +234,24 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         };
         _localStream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
 
+        final videoTracks = _localStream!.getVideoTracks();
+        if (videoTracks.isNotEmpty) {
+          final settings = videoTracks.first.getSettings();
+          final h = (settings['height'] as num?)?.toInt();
+          if (h != null && h > 0) {
+            _captureSourceHeight = h;
+          }
+        }
+
         for (final track in _localStream!.getTracks()) {
           await _peerConnection!.addTrack(track, _localStream!);
         }
 
-        await applyVideoSenderParameters(_peerConnection!, _qualityMode);
+        final resolvedCfg = _activeQualityConfig;
+        await applyVideoSenderParameters(_peerConnection!, resolvedCfg);
 
         final RTCSessionDescription rawOffer = await _peerConnection!.createOffer();
-        final optimizedSdp = optimizeVideoSdp(rawOffer.sdp ?? '', _qualityMode);
+        final optimizedSdp = optimizeVideoSdp(rawOffer.sdp ?? '', resolvedCfg);
         final offer = RTCSessionDescription(optimizedSdp, rawOffer.type);
         await _peerConnection!.setLocalDescription(offer);
 
@@ -239,16 +272,24 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     final type = message['type'];
     if (type == 'quality_mode') {
       final mode = streamQualityModeFromName(message['mode'] as String?);
-      await _setQualityMode(mode, notifyPeer: false);
+      final manualMap = message['manual'] is Map
+          ? Map<String, dynamic>.from(message['manual'] as Map)
+          : null;
+      await _setQualityMode(
+        mode,
+        manual: manualMap != null ? ManualStreamSettings.fromMap(manualMap) : null,
+        notifyPeer: false,
+      );
       return;
     }
 
     if (_peerConnection == null) return;
 
     if (type == 'answer') {
+      final resolvedCfg = _activeQualityConfig;
       final optimizedAnswerSdp = optimizeVideoSdp(
         (message['sdp'] as String?) ?? '',
-        _qualityMode,
+        resolvedCfg,
       );
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(optimizedAnswerSdp, type),
@@ -258,7 +299,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         await _peerConnection!.addCandidate(cand);
       }
       _remoteCandidates.clear();
-      await applyVideoSenderParameters(_peerConnection!, _qualityMode);
+      await applyVideoSenderParameters(_peerConnection!, resolvedCfg);
     } else if (type == 'candidate') {
       final cand = RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']);
       if (_isRemoteSet) {
@@ -459,9 +500,104 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          _qualityMode.config.description,
+                          _activeQualityConfig.description,
                           style: const TextStyle(color: Colors.white38, fontSize: 12),
                         ),
+                        if (_qualityMode == StreamQualityMode.manual) ...[
+                          const SizedBox(height: 14),
+                          Container(
+                            width: 360,
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.3),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(color: Colors.white.withOpacity(0.08)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Resolution',
+                                  style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+                                ),
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: kManualResolutionHeights.map((h) {
+                                    final selected = _manualSettings.targetHeight == h;
+                                    final label = h == 0 ? 'Native' : '${h}p';
+                                    return ChoiceChip(
+                                      label: Text(label, style: const TextStyle(fontSize: 12)),
+                                      selected: selected,
+                                      selectedColor: Colors.blueAccent,
+                                      backgroundColor: Colors.white.withOpacity(0.08),
+                                      labelStyle: TextStyle(color: selected ? Colors.white : Colors.white70),
+                                      side: BorderSide.none,
+                                      visualDensity: VisualDensity.compact,
+                                      onSelected: (_) => _setQualityMode(
+                                        StreamQualityMode.manual,
+                                        manual: _manualSettings.copyWith(targetHeight: h),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                                const SizedBox(height: 12),
+                                const Text(
+                                  'FPS',
+                                  style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+                                ),
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: kManualFpsOptions.map((fps) {
+                                    final selected = _manualSettings.fps == fps;
+                                    return ChoiceChip(
+                                      label: Text('$fps', style: const TextStyle(fontSize: 12)),
+                                      selected: selected,
+                                      selectedColor: Colors.blueAccent,
+                                      backgroundColor: Colors.white.withOpacity(0.08),
+                                      labelStyle: TextStyle(color: selected ? Colors.white : Colors.white70),
+                                      side: BorderSide.none,
+                                      visualDensity: VisualDensity.compact,
+                                      onSelected: (_) => _setQualityMode(
+                                        StreamQualityMode.manual,
+                                        manual: _manualSettings.copyWith(fps: fps),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                                const SizedBox(height: 12),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    const Text(
+                                      'Bitrate',
+                                      style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+                                    ),
+                                    Text(
+                                      '${_manualSettings.maxMbps} Mbps',
+                                      style: const TextStyle(color: Colors.blueAccent, fontSize: 12, fontWeight: FontWeight.bold),
+                                    ),
+                                  ],
+                                ),
+                                Slider(
+                                  value: _manualSettings.maxMbps.toDouble().clamp(2.0, 40.0),
+                                  min: 2,
+                                  max: 40,
+                                  divisions: 38,
+                                  activeColor: Colors.blueAccent,
+                                  inactiveColor: Colors.white24,
+                                  onChanged: (val) => _setQualityMode(
+                                    StreamQualityMode.manual,
+                                    manual: _manualSettings.copyWith(maxMbps: val.round()),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
                     ],
                   ),

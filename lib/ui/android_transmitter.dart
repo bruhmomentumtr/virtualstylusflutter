@@ -73,9 +73,13 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   // WebRTC
   bool _mirrorScreen = true;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
+  ManualStreamSettings _manualSettings = const ManualStreamSettings();
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+
+  StreamQualityConfig get _activeQualityConfig =>
+      _qualityMode.resolveConfig(manual: _manualSettings);
 
   int? _allocateTouchSlot(int flutterPointer) {
     final existing = _activeTouchSlots[flutterPointer];
@@ -114,10 +118,18 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
+    final savedHeight = prefs.getInt('manualTargetHeight') ?? 1080;
+    final savedFps = prefs.getInt('manualFps') ?? 60;
+    final savedMbps = prefs.getInt('manualMaxMbps') ?? 15;
     setState(() {
       _shortcutsOnLeft = prefs.getBool('shortcutsOnLeft') ?? true;
       _mirrorScreen = prefs.getBool('mirrorScreen') ?? true;
       _qualityMode = streamQualityModeFromName(prefs.getString('streamQualityMode'));
+      _manualSettings = ManualStreamSettings(
+        targetHeight: savedHeight < 0 ? 0 : savedHeight,
+        fps: savedFps.clamp(15, 120),
+        maxMbps: savedMbps.clamp(2, 40),
+      );
       final savedShortcuts = prefs.getString('shortcuts');
       if (savedShortcuts != null) {
         final List decoded = jsonDecode(savedShortcuts);
@@ -131,19 +143,29 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     await prefs.setBool('shortcutsOnLeft', _shortcutsOnLeft);
     await prefs.setBool('mirrorScreen', _mirrorScreen);
     await prefs.setString('streamQualityMode', _qualityMode.name);
+    await prefs.setInt('manualTargetHeight', _manualSettings.targetHeight);
+    await prefs.setInt('manualFps', _manualSettings.fps);
+    await prefs.setInt('manualMaxMbps', _manualSettings.maxMbps);
     final encoded = jsonEncode(_shortcuts.map((e) => e.toMap()).toList());
     await prefs.setString('shortcuts', encoded);
   }
 
-  void _setQualityMode(StreamQualityMode mode, {bool notifyPeer = true}) {
+  void _setQualityMode(
+    StreamQualityMode mode, {
+    ManualStreamSettings? manual,
+    bool notifyPeer = true,
+  }) {
+    final nextManual = manual ?? _manualSettings;
     setState(() {
       _qualityMode = mode;
+      _manualSettings = nextManual;
     });
     _savePrefs();
     if (notifyPeer) {
       _signaler?.sendMessage({
         'type': 'quality_mode',
         'mode': mode.name,
+        'manual': nextManual.toMap(),
       });
     }
   }
@@ -178,6 +200,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
         _signaler?.sendMessage({
           'type': 'quality_mode',
           'mode': _qualityMode.name,
+          'manual': _manualSettings.toMap(),
         });
       },
       onMessage: _handleSignalingMessage,
@@ -194,7 +217,14 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
     if (type == 'quality_mode') {
       final mode = streamQualityModeFromName(message['mode'] as String?);
-      _setQualityMode(mode, notifyPeer: false);
+      final manualMap = message['manual'] is Map
+          ? Map<String, dynamic>.from(message['manual'] as Map)
+          : null;
+      _setQualityMode(
+        mode,
+        manual: manualMap != null ? ManualStreamSettings.fromMap(manualMap) : null,
+        notifyPeer: false,
+      );
       return;
     }
 
@@ -242,7 +272,10 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       _remoteCandidates.clear();
 
       final rawAnswer = await _peerConnection!.createAnswer();
-      final optimizedSdp = optimizeVideoSdp(rawAnswer.sdp ?? '', _qualityMode);
+      final optimizedSdp = optimizeVideoSdp(
+        rawAnswer.sdp ?? '',
+        _activeQualityConfig,
+      );
       final answer = RTCSessionDescription(optimizedSdp, rawAnswer.type);
       await _peerConnection!.setLocalDescription(answer);
 
@@ -401,6 +434,155 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       pressure: 0.0,
     );
     _client!.sendEvent(shortcutEvent);
+  }
+
+  Widget _buildManualControls({
+    required ManualStreamSettings current,
+    required ValueChanged<ManualStreamSettings> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          'Resolution',
+          style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: kManualResolutionHeights.map((h) {
+            final selected = current.targetHeight == h;
+            final label = h == 0 ? 'Native' : '${h}p';
+            return ChoiceChip(
+              label: Text(label, style: const TextStyle(fontSize: 12)),
+              selected: selected,
+              selectedColor: Colors.blueAccent,
+              backgroundColor: Colors.white.withOpacity(0.08),
+              labelStyle: TextStyle(color: selected ? Colors.white : Colors.white70),
+              side: BorderSide.none,
+              visualDensity: VisualDensity.compact,
+              onSelected: (_) => onChanged(current.copyWith(targetHeight: h)),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'FPS',
+          style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: kManualFpsOptions.map((fps) {
+            final selected = current.fps == fps;
+            return ChoiceChip(
+              label: Text('$fps', style: const TextStyle(fontSize: 12)),
+              selected: selected,
+              selectedColor: Colors.blueAccent,
+              backgroundColor: Colors.white.withOpacity(0.08),
+              labelStyle: TextStyle(color: selected ? Colors.white : Colors.white70),
+              side: BorderSide.none,
+              visualDensity: VisualDensity.compact,
+              onSelected: (_) => onChanged(current.copyWith(fps: fps)),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'Bitrate',
+              style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+            Text(
+              '${current.maxMbps} Mbps',
+              style: const TextStyle(color: Colors.blueAccent, fontSize: 12, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        Slider(
+          value: current.maxMbps.toDouble().clamp(2.0, 40.0),
+          min: 2,
+          max: 40,
+          divisions: 38,
+          activeColor: Colors.blueAccent,
+          inactiveColor: Colors.white24,
+          onChanged: (val) => onChanged(current.copyWith(maxMbps: val.round())),
+        ),
+      ],
+    );
+  }
+
+  void _showQualityDialog() {
+    StreamQualityMode dialogMode = _qualityMode;
+    ManualStreamSettings dialogManual = _manualSettings;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text('Stream Quality', style: TextStyle(color: Colors.white)),
+          content: StatefulBuilder(
+            builder: (context, setDialogState) {
+              final resolved = dialogMode.resolveConfig(manual: dialogManual);
+              return SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: StreamQualityMode.values.map((mode) {
+                        final selected = dialogMode == mode;
+                        return ChoiceChip(
+                          label: Text(mode.config.label, style: const TextStyle(fontSize: 12)),
+                          selected: selected,
+                          selectedColor: Colors.blueAccent,
+                          backgroundColor: Colors.white.withOpacity(0.08),
+                          labelStyle: TextStyle(color: selected ? Colors.white : Colors.white70),
+                          side: BorderSide.none,
+                          onSelected: (_) {
+                            setDialogState(() => dialogMode = mode);
+                            _setQualityMode(mode, manual: dialogManual);
+                          },
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      resolved.description,
+                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    if (dialogMode == StreamQualityMode.manual) ...[
+                      const SizedBox(height: 14),
+                      _buildManualControls(
+                        current: dialogManual,
+                        onChanged: (updated) {
+                          setDialogState(() => dialogManual = updated);
+                          _setQualityMode(StreamQualityMode.manual, manual: updated);
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Done'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _addNewShortcut() {
@@ -614,10 +796,11 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                       color: Colors.transparent,
                       borderRadius: BorderRadius.circular(12),
                       child: InkWell(
-                        onTap: () => _setQualityMode(_qualityMode.next),
+                        onTap: _showQualityDialog,
                         borderRadius: BorderRadius.circular(12),
                         child: Tooltip(
-                          message: 'Stream: ${_qualityMode.config.label} (${_qualityMode.config.description})',
+                          message:
+                              'Stream: ${_activeQualityConfig.label} (${_activeQualityConfig.description})',
                           child: Container(
                             width: double.infinity,
                             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
@@ -634,13 +817,15 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                                       ? Icons.speed
                                       : (_qualityMode == StreamQualityMode.quality
                                           ? Icons.high_quality
-                                          : Icons.tune),
+                                          : (_qualityMode == StreamQualityMode.manual
+                                              ? Icons.display_settings
+                                              : Icons.tune)),
                                   color: Colors.blueAccent,
                                   size: 20,
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  _qualityMode.config.shortLabel,
+                                  _activeQualityConfig.shortLabel,
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 10,
@@ -851,9 +1036,11 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                                         child: Text(
                                           mode.config.label,
                                           textAlign: TextAlign.center,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
                                           style: TextStyle(
                                             color: selected ? Colors.white : Colors.white60,
-                                            fontSize: 13,
+                                            fontSize: 12,
                                             fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                                           ),
                                         ),
@@ -865,9 +1052,23 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                             ),
                             const SizedBox(height: 6),
                             Text(
-                              _qualityMode.config.description,
+                              _activeQualityConfig.description,
                               style: const TextStyle(color: Colors.white38, fontSize: 11),
                             ),
+                            if (_qualityMode == StreamQualityMode.manual) ...[
+                              const SizedBox(height: 12),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                child: _buildManualControls(
+                                  current: _manualSettings,
+                                  onChanged: (updated) => _setQualityMode(
+                                    StreamQualityMode.manual,
+                                    manual: updated,
+                                    notifyPeer: false,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),

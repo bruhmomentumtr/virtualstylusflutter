@@ -1,6 +1,55 @@
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-enum StreamQualityMode { performance, balanced, quality }
+enum StreamQualityMode { performance, balanced, quality, manual }
+
+const List<int> kManualResolutionHeights = <int>[0, 1440, 1080, 900, 720, 540];
+const List<int> kManualFpsOptions = <int>[30, 60, 90, 120];
+
+class ManualStreamSettings {
+  /// Target video height in pixels. `0` means Native (no downscaling).
+  final int targetHeight;
+  final int fps;
+  final int maxMbps;
+
+  const ManualStreamSettings({
+    this.targetHeight = 1080,
+    this.fps = 60,
+    this.maxMbps = 15,
+  });
+
+  ManualStreamSettings copyWith({
+    int? targetHeight,
+    int? fps,
+    int? maxMbps,
+  }) {
+    return ManualStreamSettings(
+      targetHeight: targetHeight ?? this.targetHeight,
+      fps: fps ?? this.fps,
+      maxMbps: maxMbps ?? this.maxMbps,
+    );
+  }
+
+  String get resolutionLabel =>
+      targetHeight <= 0 ? 'Native' : '${targetHeight}p';
+
+  Map<String, dynamic> toMap() => {
+        'targetHeight': targetHeight,
+        'fps': fps,
+        'maxMbps': maxMbps,
+      };
+
+  factory ManualStreamSettings.fromMap(Map<String, dynamic>? map) {
+    if (map == null) return const ManualStreamSettings();
+    final rawHeight = (map['targetHeight'] as num?)?.toInt() ?? 1080;
+    final rawFps = (map['fps'] as num?)?.toInt() ?? 60;
+    final rawMbps = (map['maxMbps'] as num?)?.toInt() ?? 15;
+    return ManualStreamSettings(
+      targetHeight: rawHeight < 0 ? 0 : rawHeight,
+      fps: rawFps.clamp(15, 120),
+      maxMbps: rawMbps.clamp(2, 40),
+    );
+  }
+}
 
 class StreamQualityConfig {
   final String label;
@@ -27,13 +76,16 @@ class StreamQualityConfig {
 }
 
 extension StreamQualityModeExt on StreamQualityMode {
-  StreamQualityConfig get config {
+  StreamQualityConfig resolveConfig({
+    ManualStreamSettings manual = const ManualStreamSettings(),
+    int sourceHeight = 1080,
+  }) {
     switch (this) {
       case StreamQualityMode.performance:
         return const StreamQualityConfig(
           label: 'Performance',
           shortLabel: 'Perf',
-          description: 'Lowest latency • 60 FPS',
+          description: 'Lowest latency • 60 FPS • 6 Mbps',
           startBitrateKbps: 3000,
           minBitrateKbps: 1500,
           maxBitrateKbps: 6000,
@@ -45,7 +97,7 @@ extension StreamQualityModeExt on StreamQualityMode {
         return const StreamQualityConfig(
           label: 'Balanced',
           shortLabel: 'Bal',
-          description: 'Native res • 60 FPS',
+          description: 'Native res • 60 FPS • 12 Mbps',
           startBitrateKbps: 6000,
           minBitrateKbps: 3000,
           maxBitrateKbps: 12000,
@@ -57,7 +109,7 @@ extension StreamQualityModeExt on StreamQualityMode {
         return const StreamQualityConfig(
           label: 'Quality',
           shortLabel: 'HQ',
-          description: 'Max sharpness • 25 Mbps',
+          description: 'Native res • 60 FPS • 25 Mbps',
           startBitrateKbps: 12000,
           minBitrateKbps: 6000,
           maxBitrateKbps: 25000,
@@ -65,19 +117,30 @@ extension StreamQualityModeExt on StreamQualityMode {
           scaleResolutionDownBy: 1.0,
           degradationPreference: RTCDegradationPreference.MAINTAIN_RESOLUTION,
         );
+      case StreamQualityMode.manual:
+        double scale = 1.0;
+        if (manual.targetHeight > 0 && sourceHeight > manual.targetHeight) {
+          scale = (sourceHeight / manual.targetHeight).clamp(1.0, 4.0);
+        }
+        final int maxKbps = manual.maxMbps.clamp(2, 40) * 1000;
+        final int startKbps = (maxKbps * 0.65).round().clamp(1000, maxKbps);
+        final int minKbps = (maxKbps * 0.35).round().clamp(500, startKbps);
+        return StreamQualityConfig(
+          label: 'Manual',
+          shortLabel: 'Man',
+          description:
+              '${manual.resolutionLabel} • ${manual.fps} FPS • ${manual.maxMbps} Mbps',
+          startBitrateKbps: startKbps,
+          minBitrateKbps: minKbps,
+          maxBitrateKbps: maxKbps,
+          maxFramerate: manual.fps.clamp(15, 120),
+          scaleResolutionDownBy: scale,
+          degradationPreference: RTCDegradationPreference.MAINTAIN_RESOLUTION,
+        );
     }
   }
 
-  StreamQualityMode get next {
-    switch (this) {
-      case StreamQualityMode.performance:
-        return StreamQualityMode.balanced;
-      case StreamQualityMode.balanced:
-        return StreamQualityMode.quality;
-      case StreamQualityMode.quality:
-        return StreamQualityMode.performance;
-    }
-  }
+  StreamQualityConfig get config => resolveConfig();
 }
 
 StreamQualityMode streamQualityModeFromName(String? name) {
@@ -86,6 +149,8 @@ StreamQualityMode streamQualityModeFromName(String? name) {
       return StreamQualityMode.performance;
     case 'quality':
       return StreamQualityMode.quality;
+    case 'manual':
+      return StreamQualityMode.manual;
     case 'balanced':
     default:
       return StreamQualityMode.balanced;
@@ -94,9 +159,8 @@ StreamQualityMode streamQualityModeFromName(String? name) {
 
 /// Optimizes a WebRTC SDP string so local-network screen mirroring starts at
 /// high bitrate immediately instead of ramping up slowly from ~300 kbps.
-String optimizeVideoSdp(String sdp, StreamQualityMode mode) {
+String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
   try {
-    final cfg = mode.config;
     final hasCrLf = sdp.contains('\r\n');
     final lineSep = hasCrLf ? '\r\n' : '\n';
     final lines = sdp.split(RegExp(r'\r?\n'));
@@ -241,10 +305,9 @@ String optimizeVideoSdp(String sdp, StreamQualityMode mode) {
 /// directly on active video RTCRtpSenders (works live without reconnecting).
 Future<void> applyVideoSenderParameters(
   RTCPeerConnection pc,
-  StreamQualityMode mode,
+  StreamQualityConfig cfg,
 ) async {
   try {
-    final cfg = mode.config;
     final senders = await pc.getSenders();
     for (final sender in senders) {
       if (sender.track?.kind != 'video') continue;
