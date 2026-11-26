@@ -1,5 +1,9 @@
 #include "flutter_window.h"
 
+#include <mfapi.h>
+#include <mferror.h>
+#include <mftransform.h>
+
 #include <algorithm>
 #include <optional>
 #include <vector>
@@ -10,6 +14,46 @@
 #include <iostream>
 
 namespace {
+
+constexpr DWORD MakeFourCC(char a, char b, char c, char d) {
+  return static_cast<DWORD>(static_cast<uint8_t>(a)) |
+         (static_cast<DWORD>(static_cast<uint8_t>(b)) << 8) |
+         (static_cast<DWORD>(static_cast<uint8_t>(c)) << 16) |
+         (static_cast<DWORD>(static_cast<uint8_t>(d)) << 24);
+}
+
+constexpr GUID MakeVideoSubtype(DWORD fourcc) {
+  return GUID{fourcc,
+              0x0000,
+              0x0010,
+              {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+}
+
+bool HasHardwareVideoEncoder(const GUID& subtype) {
+  MFT_REGISTER_TYPE_INFO output_type = {};
+  output_type.guidMajorType = MFMediaType_Video;
+  output_type.guidSubtype = subtype;
+
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0;
+  HRESULT hr = MFTEnumEx(
+      MFT_CATEGORY_VIDEO_ENCODER,
+      MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+      nullptr,
+      &output_type,
+      &activates,
+      &count);
+  if (FAILED(hr) || activates == nullptr) {
+    return false;
+  }
+  for (UINT32 i = 0; i < count; ++i) {
+    if (activates[i] != nullptr) {
+      activates[i]->Release();
+    }
+  }
+  CoTaskMemFree(activates);
+  return count > 0;
+}
 
 constexpr DWORD kTouchDownFlags =
     POINTER_FLAG_NEW | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT |
@@ -346,6 +390,36 @@ bool FlutterWindow::OnCreate() {
         if (call.method_name() == "clearTouches") {
           ClearAllTouches();
           result->Success();
+          return;
+        }
+        if (call.method_name() == "getHardwareEncoders") {
+          HRESULT mf_hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+          flutter::EncodableMap encoders;
+          if (SUCCEEDED(mf_hr)) {
+            encoders[flutter::EncodableValue("h264")] = flutter::EncodableValue(
+                HasHardwareVideoEncoder(
+                    MakeVideoSubtype(MakeFourCC('H', '2', '6', '4'))));
+            encoders[flutter::EncodableValue("h265")] = flutter::EncodableValue(
+                HasHardwareVideoEncoder(
+                    MakeVideoSubtype(MakeFourCC('H', 'E', 'V', 'C'))));
+            encoders[flutter::EncodableValue("vp8")] = flutter::EncodableValue(
+                HasHardwareVideoEncoder(
+                    MakeVideoSubtype(MakeFourCC('V', 'P', '8', '0'))));
+            encoders[flutter::EncodableValue("vp9")] = flutter::EncodableValue(
+                HasHardwareVideoEncoder(
+                    MakeVideoSubtype(MakeFourCC('V', 'P', '9', '0'))));
+            encoders[flutter::EncodableValue("av1")] = flutter::EncodableValue(
+                HasHardwareVideoEncoder(
+                    MakeVideoSubtype(MakeFourCC('A', 'V', '0', '1'))));
+            MFShutdown();
+          } else {
+            encoders[flutter::EncodableValue("h264")] = flutter::EncodableValue(false);
+            encoders[flutter::EncodableValue("h265")] = flutter::EncodableValue(false);
+            encoders[flutter::EncodableValue("vp8")] = flutter::EncodableValue(false);
+            encoders[flutter::EncodableValue("vp9")] = flutter::EncodableValue(false);
+            encoders[flutter::EncodableValue("av1")] = flutter::EncodableValue(false);
+          }
+          result->Success(flutter::EncodableValue(encoders));
           return;
         }
         if (call.method_name() == "injectPenEvent") {

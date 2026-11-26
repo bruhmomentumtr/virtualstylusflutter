@@ -26,6 +26,8 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   bool _enableScreenMirroring = true;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
+  VideoCodecPreference _videoCodec = VideoCodecPreference.auto;
+  Map<VideoCodecPreference, CodecCapability> _codecCapabilities = {};
   int _captureSourceHeight = 1080;
   String? _captureSourceId;
   int _currentCaptureFps = 0;
@@ -97,25 +99,108 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   void initState() {
     super.initState();
     _loadPrefs();
+    _detectCodecCapabilities();
     _initServer();
     _startSignalingServer();
+  }
+
+  Future<void> _detectCodecCapabilities() async {
+    Map<String, bool> hwMap = {};
+    try {
+      final raw = await _channel.invokeMethod('getHardwareEncoders');
+      if (raw is Map) {
+        for (final entry in raw.entries) {
+          hwMap[entry.key.toString()] = entry.value == true;
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to query hardware encoders: $e');
+    }
+
+    final webrtcSupported = await probeWebRtcVideoCodecs();
+    final caps = <VideoCodecPreference, CodecCapability>{};
+    for (final codec in VideoCodecPreference.values) {
+      if (codec == VideoCodecPreference.auto) continue;
+      caps[codec] = CodecCapability(
+        supported: webrtcSupported.contains(codec),
+        hardware: hwMap[codec.name] == true,
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _codecCapabilities = caps;
+      });
+    } else {
+      _codecCapabilities = caps;
+    }
+
+    if (_connectedIp != null) {
+      _sendCodecCapabilitiesToPeer();
+    }
+  }
+
+  void _sendCodecCapabilitiesToPeer() {
+    if (_signaler == null || _codecCapabilities.isEmpty) return;
+    final serialized = <String, dynamic>{};
+    for (final entry in _codecCapabilities.entries) {
+      serialized[entry.key.name] = entry.value.toMap();
+    }
+    _signaler?.sendMessage({
+      'type': 'codec_capabilities',
+      'codec': _videoCodec.name,
+      'capabilities': serialized,
+    });
   }
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     final savedMode = prefs.getString('streamQualityMode');
+    final savedCodec = prefs.getString('videoCodecPreference');
     final savedHeight = prefs.getInt('manualTargetHeight') ?? 1080;
     final savedFps = prefs.getInt('manualFps') ?? 60;
     final savedMbps = prefs.getInt('manualMaxMbps') ?? 15;
     if (mounted) {
       setState(() {
         _qualityMode = streamQualityModeFromName(savedMode);
+        _videoCodec = videoCodecPreferenceFromName(savedCodec);
         _manualSettings = ManualStreamSettings(
           targetHeight: savedHeight < 0 ? 0 : savedHeight,
           fps: savedFps.clamp(15, 120),
           maxMbps: savedMbps.clamp(2, 40),
         );
       });
+    }
+  }
+
+  Future<void> _setVideoCodec(
+    VideoCodecPreference codec, {
+    bool notifyPeer = true,
+  }) async {
+    final changed = _videoCodec != codec;
+    if (mounted) {
+      setState(() {
+        _videoCodec = codec;
+      });
+    } else {
+      _videoCodec = codec;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('videoCodecPreference', codec.name);
+
+    if (notifyPeer && _connectedIp != null) {
+      _signaler?.sendMessage({
+        'type': 'codec_mode',
+        'codec': codec.name,
+      });
+    }
+
+    // Codec changes require fresh SDP negotiation; cleanly restart WebRTC
+    // when connected so the newly selected codec takes effect immediately.
+    if (changed && _connectedIp != null && _enableScreenMirroring) {
+      _closeWebRtc();
+      await _setupWebRtcAndSendOffer();
     }
   }
 
@@ -232,6 +317,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
           _connectedIp = ip;
         });
         _server.lockedIp = ip;
+        _sendCodecCapabilitiesToPeer();
         _setupWebRtcAndSendOffer();
       },
       onDisconnect: () {
@@ -291,7 +377,11 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         await applyVideoSenderParameters(_peerConnection!, resolvedCfg);
 
         final RTCSessionDescription rawOffer = await _peerConnection!.createOffer();
-        final optimizedSdp = optimizeVideoSdp(rawOffer.sdp ?? '', resolvedCfg);
+        final optimizedSdp = optimizeVideoSdp(
+          rawOffer.sdp ?? '',
+          resolvedCfg,
+          codecPreference: _videoCodec,
+        );
         final offer = RTCSessionDescription(optimizedSdp, rawOffer.type);
         await _peerConnection!.setLocalDescription(offer);
 
@@ -322,6 +412,11 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       );
       return;
     }
+    if (type == 'codec_mode') {
+      final codec = videoCodecPreferenceFromName(message['codec'] as String?);
+      await _setVideoCodec(codec, notifyPeer: false);
+      return;
+    }
 
     if (_peerConnection == null) return;
 
@@ -330,6 +425,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       final optimizedAnswerSdp = optimizeVideoSdp(
         (message['sdp'] as String?) ?? '',
         resolvedCfg,
+        codecPreference: _videoCodec,
       );
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(optimizedAnswerSdp, type),
@@ -639,6 +735,85 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                             ),
                           ),
                         ],
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Video Codec (PC Encoder)',
+                          style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          alignment: WrapAlignment.center,
+                          children: VideoCodecPreference.values.map((codec) {
+                            final selected = _videoCodec == codec;
+                            final cap = _codecCapabilities[codec];
+                            final isAuto = codec == VideoCodecPreference.auto;
+                            final supported = isAuto || (cap?.supported ?? true);
+                            final isHw = !isAuto && (cap?.hardware == true);
+                            final badgeText = isAuto
+                                ? null
+                                : (cap == null ? '...' : cap.badge);
+                            final badgeColor = !supported
+                                ? Colors.white24
+                                : (isHw ? Colors.greenAccent : Colors.amberAccent);
+
+                            return InkWell(
+                              onTap: supported ? () => _setVideoCodec(codec) : null,
+                              borderRadius: BorderRadius.circular(10),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 160),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                                decoration: BoxDecoration(
+                                  color: selected
+                                      ? Colors.blueAccent
+                                      : Colors.black.withOpacity(supported ? 0.35 : 0.18),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: selected
+                                        ? Colors.blueAccent
+                                        : Colors.white.withOpacity(supported ? 0.1 : 0.04),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      codec.label,
+                                      style: TextStyle(
+                                        color: !supported
+                                            ? Colors.white30
+                                            : (selected ? Colors.white : Colors.white70),
+                                        fontSize: 12,
+                                        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                                      ),
+                                    ),
+                                    if (badgeText != null) ...[
+                                      const SizedBox(width: 5),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                        decoration: BoxDecoration(
+                                          color: selected
+                                              ? Colors.black.withOpacity(0.25)
+                                              : badgeColor.withOpacity(0.15),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          badgeText,
+                                          style: TextStyle(
+                                            color: selected ? Colors.white : badgeColor,
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
                       ],
                     ],
                   ),

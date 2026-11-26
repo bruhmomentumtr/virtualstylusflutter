@@ -2,6 +2,142 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 enum StreamQualityMode { performance, balanced, quality, manual }
 
+enum VideoCodecPreference { auto, vp8, h264, vp9, h265, av1 }
+
+class CodecCapability {
+  final bool supported;
+  final bool hardware;
+
+  const CodecCapability({
+    required this.supported,
+    required this.hardware,
+  });
+
+  String get badge => !supported ? 'N/A' : (hardware ? 'HW' : 'SW');
+
+  Map<String, dynamic> toMap() => {
+        'supported': supported,
+        'hardware': hardware,
+      };
+
+  factory CodecCapability.fromMap(Map<dynamic, dynamic>? map) {
+    if (map == null) {
+      return const CodecCapability(supported: false, hardware: false);
+    }
+    return CodecCapability(
+      supported: map['supported'] == true,
+      hardware: map['hardware'] == true,
+    );
+  }
+}
+
+extension VideoCodecPreferenceExt on VideoCodecPreference {
+  String get label {
+    switch (this) {
+      case VideoCodecPreference.auto:
+        return 'Auto';
+      case VideoCodecPreference.vp8:
+        return 'VP8';
+      case VideoCodecPreference.h264:
+        return 'H264';
+      case VideoCodecPreference.vp9:
+        return 'VP9';
+      case VideoCodecPreference.h265:
+        return 'H265';
+      case VideoCodecPreference.av1:
+        return 'AV1';
+    }
+  }
+
+  /// SDP rtpmap codec names that match this preference.
+  List<String> get sdpNames {
+    switch (this) {
+      case VideoCodecPreference.auto:
+      case VideoCodecPreference.vp8:
+        return const ['VP8'];
+      case VideoCodecPreference.h264:
+        return const ['H264'];
+      case VideoCodecPreference.vp9:
+        return const ['VP9'];
+      case VideoCodecPreference.h265:
+        return const ['H265', 'HEVC'];
+      case VideoCodecPreference.av1:
+        return const ['AV1', 'AV1X'];
+    }
+  }
+}
+
+VideoCodecPreference videoCodecPreferenceFromName(String? name) {
+  switch (name) {
+    case 'vp8':
+      return VideoCodecPreference.vp8;
+    case 'h264':
+      return VideoCodecPreference.h264;
+    case 'vp9':
+      return VideoCodecPreference.vp9;
+    case 'h265':
+      return VideoCodecPreference.h265;
+    case 'av1':
+      return VideoCodecPreference.av1;
+    case 'auto':
+    default:
+      return VideoCodecPreference.auto;
+  }
+}
+
+/// Parses the video codecs advertised in a WebRTC SDP offer/answer.
+Set<VideoCodecPreference> parseSupportedVideoCodecsFromSdp(String sdp) {
+  final supported = <VideoCodecPreference>{};
+  final lines = sdp.split(RegExp(r'\r?\n'));
+  final videoStart = lines.indexWhere((l) => l.startsWith('m=video '));
+  if (videoStart == -1) return supported;
+
+  final rtpmapRegex = RegExp(
+    r'^a=rtpmap:\d+\s+([A-Za-z0-9\-_]+)/',
+    caseSensitive: false,
+  );
+  for (int i = videoStart + 1; i < lines.length; i++) {
+    if (lines[i].startsWith('m=')) break;
+    final m = rtpmapRegex.firstMatch(lines[i]);
+    if (m == null) continue;
+    final codec = m.group(1)!.toUpperCase();
+    if (codec == 'VP8') supported.add(VideoCodecPreference.vp8);
+    if (codec == 'H264') supported.add(VideoCodecPreference.h264);
+    if (codec == 'VP9') supported.add(VideoCodecPreference.vp9);
+    if (codec == 'H265' || codec == 'HEVC') {
+      supported.add(VideoCodecPreference.h265);
+    }
+    if (codec == 'AV1' || codec == 'AV1X') {
+      supported.add(VideoCodecPreference.av1);
+    }
+  }
+  return supported;
+}
+
+/// Probes the local libwebrtc build for supported video codecs by creating a
+/// short-lived offer with a send-only video transceiver.
+Future<Set<VideoCodecPreference>> probeWebRtcVideoCodecs() async {
+  RTCPeerConnection? pc;
+  try {
+    pc = await createPeerConnection({'iceServers': []});
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly),
+    );
+    final offer = await pc.createOffer();
+    return parseSupportedVideoCodecsFromSdp(offer.sdp ?? '');
+  } catch (_) {
+    return const {
+      VideoCodecPreference.vp8,
+      VideoCodecPreference.h264,
+      VideoCodecPreference.vp9,
+      VideoCodecPreference.av1,
+    };
+  } finally {
+    await pc?.close();
+  }
+}
+
 const List<int> kManualResolutionHeights = <int>[0, 1440, 1080, 900, 720, 540];
 const List<int> kManualFpsOptions = <int>[30, 60, 90, 120];
 
@@ -158,8 +294,13 @@ StreamQualityMode streamQualityModeFromName(String? name) {
 }
 
 /// Optimizes a WebRTC SDP string so local-network screen mirroring starts at
-/// high bitrate immediately instead of ramping up slowly from ~300 kbps.
-String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
+/// high bitrate immediately instead of ramping up slowly from ~300 kbps,
+/// and prioritizes the selected video codec.
+String optimizeVideoSdp(
+  String sdp,
+  StreamQualityConfig cfg, {
+  VideoCodecPreference codecPreference = VideoCodecPreference.auto,
+}) {
   try {
     final hasCrLf = sdp.contains('\r\n');
     final lineSep = hasCrLf ? '\r\n' : '\n';
@@ -176,10 +317,10 @@ String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
       }
     }
 
-    // Collect payload types for video codecs (and identify VP8 for lowest-latency
-    // real-time encoding on Windows libwebrtc + HW decode on Android).
+    // Collect payload types for video codecs and identify preferred codec PTs.
+    final preferredCodecNames = codecPreference.sdpNames;
     final videoCodecPts = <String>{};
-    final vp8Pts = <String>[];
+    final preferredPts = <String>[];
     final rtpmapRegex = RegExp(
       r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-_]+)/',
       caseSensitive: false,
@@ -190,20 +331,22 @@ String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
         final pt = m.group(1)!;
         final codec = m.group(2)!.toUpperCase();
         if (codec == 'H264' ||
+            codec == 'H265' ||
+            codec == 'HEVC' ||
             codec == 'VP8' ||
             codec == 'VP9' ||
-            codec == 'AV1') {
+            codec == 'AV1' ||
+            codec == 'AV1X') {
           videoCodecPts.add(pt);
-          if (codec == 'VP8') {
-            vp8Pts.add(pt);
+          if (preferredCodecNames.contains(codec)) {
+            preferredPts.add(pt);
           }
         }
       }
     }
 
-    // Prefer VP8 first on the m=video line for zero-lookahead low-latency
-    // screen streaming (avoids OpenH264 software encoder buffering on Windows).
-    if (vp8Pts.isNotEmpty) {
+    // Move the preferred codec payload types to the front of m=video.
+    if (preferredPts.isNotEmpty) {
       final parts = lines[videoStart].split(' ');
       if (parts.length > 3) {
         final header = parts.sublist(0, 3);
@@ -211,7 +354,7 @@ String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
         final preferred = <String>[];
         final others = <String>[];
         for (final pt in payloadTypes) {
-          if (vp8Pts.contains(pt)) {
+          if (preferredPts.contains(pt)) {
             preferred.add(pt);
           } else {
             others.add(pt);

@@ -74,6 +74,8 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   bool _mirrorScreen = true;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
+  VideoCodecPreference _videoCodec = VideoCodecPreference.auto;
+  Map<VideoCodecPreference, CodecCapability> _codecCapabilities = {};
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -125,6 +127,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       _shortcutsOnLeft = prefs.getBool('shortcutsOnLeft') ?? true;
       _mirrorScreen = prefs.getBool('mirrorScreen') ?? true;
       _qualityMode = streamQualityModeFromName(prefs.getString('streamQualityMode'));
+      _videoCodec = videoCodecPreferenceFromName(prefs.getString('videoCodecPreference'));
       _manualSettings = ManualStreamSettings(
         targetHeight: savedHeight < 0 ? 0 : savedHeight,
         fps: savedFps.clamp(15, 120),
@@ -143,11 +146,25 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     await prefs.setBool('shortcutsOnLeft', _shortcutsOnLeft);
     await prefs.setBool('mirrorScreen', _mirrorScreen);
     await prefs.setString('streamQualityMode', _qualityMode.name);
+    await prefs.setString('videoCodecPreference', _videoCodec.name);
     await prefs.setInt('manualTargetHeight', _manualSettings.targetHeight);
     await prefs.setInt('manualFps', _manualSettings.fps);
     await prefs.setInt('manualMaxMbps', _manualSettings.maxMbps);
     final encoded = jsonEncode(_shortcuts.map((e) => e.toMap()).toList());
     await prefs.setString('shortcuts', encoded);
+  }
+
+  void _setVideoCodec(VideoCodecPreference codec, {bool notifyPeer = true}) {
+    setState(() {
+      _videoCodec = codec;
+    });
+    _savePrefs();
+    if (notifyPeer) {
+      _signaler?.sendMessage({
+        'type': 'codec_mode',
+        'codec': codec.name,
+      });
+    }
   }
 
   void _setQualityMode(
@@ -228,7 +245,39 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       return;
     }
 
+    if (type == 'codec_mode') {
+      final codec = videoCodecPreferenceFromName(message['codec'] as String?);
+      _setVideoCodec(codec, notifyPeer: false);
+      return;
+    }
+
+    if (type == 'codec_capabilities') {
+      final rawCaps = message['capabilities'];
+      final parsed = <VideoCodecPreference, CodecCapability>{};
+      if (rawCaps is Map) {
+        for (final entry in rawCaps.entries) {
+          final pref = videoCodecPreferenceFromName(entry.key.toString());
+          if (pref == VideoCodecPreference.auto) continue;
+          if (entry.value is Map) {
+            parsed[pref] = CodecCapability.fromMap(entry.value as Map);
+          }
+        }
+      }
+      final pcCodec = message['codec'] as String?;
+      setState(() {
+        _codecCapabilities = parsed;
+        if (pcCodec != null) {
+          _videoCodec = videoCodecPreferenceFromName(pcCodec);
+        }
+      });
+      return;
+    }
+
     if (type == 'offer') {
+      if (_peerConnection != null) {
+        await _peerConnection!.close();
+        _peerConnection = null;
+      }
       _isRemoteSet = false;
       _remoteCandidates.clear();
 
@@ -275,6 +324,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       final optimizedSdp = optimizeVideoSdp(
         rawAnswer.sdp ?? '',
         _activeQualityConfig,
+        codecPreference: _videoCodec,
       );
       final answer = RTCSessionDescription(optimizedSdp, rawAnswer.type);
       await _peerConnection!.setLocalDescription(answer);
@@ -517,16 +567,104 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     );
   }
 
+  Widget _buildCodecSelector({
+    required VideoCodecPreference selectedCodec,
+    required ValueChanged<VideoCodecPreference> onSelected,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          'Video Codec',
+          style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: VideoCodecPreference.values.map((codec) {
+            final selected = selectedCodec == codec;
+            final cap = _codecCapabilities[codec];
+            final isAuto = codec == VideoCodecPreference.auto;
+            final supported = isAuto || (cap?.supported ?? true);
+            final isHw = !isAuto && (cap?.hardware == true);
+            final badgeText = isAuto || cap == null ? null : cap.badge;
+            final badgeColor = !supported
+                ? Colors.white24
+                : (isHw ? Colors.greenAccent : Colors.amberAccent);
+
+            return InkWell(
+              onTap: supported ? () => onSelected(codec) : null,
+              borderRadius: BorderRadius.circular(10),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? Colors.blueAccent
+                      : Colors.white.withOpacity(supported ? 0.08 : 0.03),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: selected
+                        ? Colors.blueAccent
+                        : Colors.white.withOpacity(supported ? 0.1 : 0.04),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      codec.label,
+                      style: TextStyle(
+                        color: !supported
+                            ? Colors.white30
+                            : (selected ? Colors.white : Colors.white70),
+                        fontSize: 12,
+                        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                      ),
+                    ),
+                    if (badgeText != null) ...[
+                      const SizedBox(width: 5),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? Colors.black.withOpacity(0.25)
+                              : badgeColor.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          badgeText,
+                          style: TextStyle(
+                            color: selected ? Colors.white : badgeColor,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+
   void _showQualityDialog() {
     StreamQualityMode dialogMode = _qualityMode;
     ManualStreamSettings dialogManual = _manualSettings;
+    VideoCodecPreference dialogCodec = _videoCodec;
 
     showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
           backgroundColor: Colors.grey[900],
-          title: const Text('Stream Quality', style: TextStyle(color: Colors.white)),
+          title: const Text('Stream Quality & Codec', style: TextStyle(color: Colors.white)),
           content: StatefulBuilder(
             builder: (context, setDialogState) {
               final resolved = dialogMode.resolveConfig(manual: dialogManual);
@@ -569,6 +707,14 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                         },
                       ),
                     ],
+                    const SizedBox(height: 16),
+                    _buildCodecSelector(
+                      selectedCodec: dialogCodec,
+                      onSelected: (codec) {
+                        setDialogState(() => dialogCodec = codec);
+                        _setVideoCodec(codec);
+                      },
+                    ),
                   ],
                 ),
               );
@@ -1070,6 +1216,14 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                                 ),
                               ),
                             ],
+                            const SizedBox(height: 10),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              child: _buildCodecSelector(
+                                selectedCodec: _videoCodec,
+                                onSelected: (codec) => _setVideoCodec(codec, notifyPeer: false),
+                              ),
+                            ),
                           ],
                         ),
                       ),
