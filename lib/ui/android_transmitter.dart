@@ -674,6 +674,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                     child: RTCVideoView(
                       _remoteRenderer,
                       objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      filterQuality: FilterQuality.low,
                     ),
                   ),
                 Positioned.fill(

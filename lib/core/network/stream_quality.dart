@@ -176,9 +176,10 @@ String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
       }
     }
 
-    // Collect payload types for video codecs (and identify H264 for HW accel).
+    // Collect payload types for video codecs (and identify VP8 for lowest-latency
+    // real-time encoding on Windows libwebrtc + HW decode on Android).
     final videoCodecPts = <String>{};
-    final h264Pts = <String>[];
+    final vp8Pts = <String>[];
     final rtpmapRegex = RegExp(
       r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-_]+)/',
       caseSensitive: false,
@@ -193,15 +194,16 @@ String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
             codec == 'VP9' ||
             codec == 'AV1') {
           videoCodecPts.add(pt);
-          if (codec == 'H264') {
-            h264Pts.add(pt);
+          if (codec == 'VP8') {
+            vp8Pts.add(pt);
           }
         }
       }
     }
 
-    // Prefer H264 first on the m=video line for hardware encode/decode.
-    if (h264Pts.isNotEmpty) {
+    // Prefer VP8 first on the m=video line for zero-lookahead low-latency
+    // screen streaming (avoids OpenH264 software encoder buffering on Windows).
+    if (vp8Pts.isNotEmpty) {
       final parts = lines[videoStart].split(' ');
       if (parts.length > 3) {
         final header = parts.sublist(0, 3);
@@ -209,7 +211,7 @@ String optimizeVideoSdp(String sdp, StreamQualityConfig cfg) {
         final preferred = <String>[];
         final others = <String>[];
         for (final pt in payloadTypes) {
-          if (h264Pts.contains(pt)) {
+          if (vp8Pts.contains(pt)) {
             preferred.add(pt);
           } else {
             others.add(pt);

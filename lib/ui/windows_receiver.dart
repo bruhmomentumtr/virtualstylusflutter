@@ -27,6 +27,8 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
   int _captureSourceHeight = 1080;
+  String? _captureSourceId;
+  int _currentCaptureFps = 0;
   String? _connectedIp;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
@@ -36,6 +38,60 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         manual: _manualSettings,
         sourceHeight: _captureSourceHeight,
       );
+
+  int _detectScreenHeight() {
+    try {
+      final views = PlatformDispatcher.instance.views;
+      if (views.isNotEmpty) {
+        final h = views.first.display.size.height.round();
+        if (h > 0) return h;
+      }
+    } catch (_) {}
+    return _captureSourceHeight;
+  }
+
+  Future<MediaStream> _openDesktopStream(String sourceId, int fps) async {
+    // flutter_webrtc's Windows FlutterScreenCapture::GetDisplayMedia reads:
+    //   video.deviceId.exact      -> desktop source ID
+    //   video.mandatory.frameRate -> capture FPS as a double (defaults to 30.0!)
+    final mediaConstraints = <String, dynamic>{
+      'audio': false,
+      'video': {
+        'deviceId': {'exact': sourceId},
+        'mandatory': {
+          'frameRate': fps.toDouble(),
+        },
+      },
+    };
+    return navigator.mediaDevices.getDisplayMedia(mediaConstraints);
+  }
+
+  Future<void> _restartCaptureForFps(int targetFps) async {
+    if (_peerConnection == null || _captureSourceId == null) return;
+    if (_currentCaptureFps == targetFps) return;
+    try {
+      final newStream = await _openDesktopStream(_captureSourceId!, targetFps);
+      final newTracks = newStream.getVideoTracks();
+      if (newTracks.isEmpty) {
+        await newStream.dispose();
+        return;
+      }
+      final newTrack = newTracks.first;
+      final senders = await _peerConnection!.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') {
+          await sender.replaceTrack(newTrack);
+        }
+      }
+      final oldStream = _localStream;
+      _localStream = newStream;
+      _currentCaptureFps = targetFps;
+      oldStream?.getTracks().forEach((track) => track.stop());
+      await oldStream?.dispose();
+    } catch (e) {
+      debugPrint('Failed to restart capture at $targetFps FPS: $e');
+    }
+  }
 
   @override
   void initState() {
@@ -86,7 +142,11 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     await prefs.setInt('manualMaxMbps', nextManual.maxMbps);
 
     if (_peerConnection != null) {
-      await applyVideoSenderParameters(_peerConnection!, _activeQualityConfig);
+      final cfg = _activeQualityConfig;
+      if (cfg.maxFramerate != _currentCaptureFps) {
+        await _restartCaptureForFps(cfg.maxFramerate);
+      }
+      await applyVideoSenderParameters(_peerConnection!, cfg);
     }
 
     if (notifyPeer && _connectedIp != null) {
@@ -214,34 +274,14 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
 
     // Get screen stream
     try {
+      _captureSourceHeight = _detectScreenHeight();
       final sources = await desktopCapturer.getSources(types: [SourceType.Screen]);
       if (sources.isNotEmpty) {
         final source = sources.first; // primary monitor
+        _captureSourceId = source.id;
         final cfg = _activeQualityConfig;
-        final mediaConstraints = <String, dynamic>{
-          'audio': false,
-          'video': {
-            'mandatory': {
-              'chromeMediaSource': 'desktop',
-              'chromeMediaSourceId': source.id,
-              'maxFrameRate': cfg.maxFramerate,
-            },
-            'frameRate': {
-              'ideal': cfg.maxFramerate,
-              'max': cfg.maxFramerate,
-            },
-          }
-        };
-        _localStream = await navigator.mediaDevices.getDisplayMedia(mediaConstraints);
-
-        final videoTracks = _localStream!.getVideoTracks();
-        if (videoTracks.isNotEmpty) {
-          final settings = videoTracks.first.getSettings();
-          final h = (settings['height'] as num?)?.toInt();
-          if (h != null && h > 0) {
-            _captureSourceHeight = h;
-          }
-        }
+        _localStream = await _openDesktopStream(source.id, cfg.maxFramerate);
+        _currentCaptureFps = cfg.maxFramerate;
 
         for (final track in _localStream!.getTracks()) {
           await _peerConnection!.addTrack(track, _localStream!);
@@ -314,6 +354,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
     _localStream = null;
+    _currentCaptureFps = 0;
     _peerConnection?.close();
     _peerConnection = null;
   }
