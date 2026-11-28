@@ -11,16 +11,52 @@ class MainActivity : FlutterActivity() {
         private const val DEVICE_CHANNEL = "com.virtualstylus/device"
     }
 
+    private var deviceChannel: MethodChannel? = null
+    private var hwVideoPlayer: HardwareVideoPlayer? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL)
-            .setMethodCallHandler { call, result ->
-                if (call.method == "getHardwareDecoders") {
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL)
+        deviceChannel = channel
+
+        hwVideoPlayer = HardwareVideoPlayer(flutterEngine.renderer) { w, h ->
+            deviceChannel?.invokeMethod(
+                "onNativeVideoDimensions",
+                mapOf("width" to w, "height" to h)
+            )
+        }
+
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getHardwareDecoders" -> {
                     result.success(getHardwareDecoders())
-                } else {
-                    result.notImplemented()
                 }
+                "startNativeVideo" -> {
+                    val hostIp = call.argument<String>("hostIp") ?: ""
+                    val port = call.argument<Int>("port") ?: 4002
+                    if (hostIp.isEmpty()) {
+                        result.error("INVALID_ARGS", "hostIp required", null)
+                    } else {
+                        val texId = hwVideoPlayer?.start(hostIp, port) ?: -1L
+                        result.success(texId)
+                    }
+                }
+                "stopNativeVideo" -> {
+                    hwVideoPlayer?.stop()
+                    result.success(null)
+                }
+                "getNativeVideoStats" -> {
+                    result.success(hwVideoPlayer?.getStats() ?: emptyMap<String, Any>())
+                }
+                else -> result.notImplemented()
             }
+        }
+    }
+
+    override fun onDestroy() {
+        hwVideoPlayer?.stop()
+        hwVideoPlayer = null
+        super.onDestroy()
     }
 
     private fun getHardwareDecoders(): Map<String, Boolean> {

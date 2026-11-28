@@ -71,9 +71,14 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   final Map<int, int> _activeTouchSlots = <int, int>{};
   int _touchSequence = 0;
 
-  // WebRTC
+  // Video Streaming (Native MediaCodec HW primary, WebRTC fallback)
   static const MethodChannel _deviceChannel = MethodChannel('com.virtualstylus/device');
   bool _mirrorScreen = true;
+  bool _usingNativeHwStream = false;
+  int? _nativeTextureId;
+  int _nativeVideoWidth = 0;
+  int _nativeVideoHeight = 0;
+  String? _connectedHostIp;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
   VideoCodecPreference _videoCodec = VideoCodecPreference.auto;
@@ -122,9 +127,62 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   @override
   void initState() {
     super.initState();
+    _deviceChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onNativeVideoDimensions') {
+        final args = call.arguments;
+        if (args is Map && mounted) {
+          final w = (args['width'] as num?)?.toInt() ?? 0;
+          final h = (args['height'] as num?)?.toInt() ?? 0;
+          if (w > 0 && h > 0) {
+            setState(() {
+              _nativeVideoWidth = w;
+              _nativeVideoHeight = h;
+            });
+          }
+        }
+      }
+    });
     _loadPrefs();
     _detectTabletCodecCapabilities();
     _remoteRenderer.initialize();
+  }
+
+  Future<void> _startNativeVideo(int port) async {
+    final hostIp = _connectedHostIp;
+    if (!_mirrorScreen || hostIp == null || hostIp.isEmpty) return;
+    try {
+      final texId = await _deviceChannel.invokeMethod<int>('startNativeVideo', {
+        'hostIp': hostIp,
+        'port': port,
+      });
+      if (mounted && texId != null && texId >= 0) {
+        setState(() {
+          _nativeTextureId = texId;
+          _usingNativeHwStream = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to start native HW video: $e');
+    }
+  }
+
+  Future<void> _stopNativeVideo() async {
+    try {
+      await _deviceChannel.invokeMethod('stopNativeVideo');
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _usingNativeHwStream = false;
+        _nativeTextureId = null;
+        _nativeVideoWidth = 0;
+        _nativeVideoHeight = 0;
+      });
+    } else {
+      _usingNativeHwStream = false;
+      _nativeTextureId = null;
+      _nativeVideoWidth = 0;
+      _nativeVideoHeight = 0;
+    }
   }
 
   Future<void> _detectTabletCodecCapabilities() async {
@@ -144,9 +202,14 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     final caps = <VideoCodecPreference, CodecCapability>{};
     for (final codec in VideoCodecPreference.values) {
       if (codec == VideoCodecPreference.auto) continue;
+      final isHw = hwMap[codec.name] == true;
+      // Native MediaCodec player supports H264 and H265 (HEVC) directly in HW.
+      final nativeHwSupported = isHw &&
+          (codec == VideoCodecPreference.h264 ||
+              codec == VideoCodecPreference.h265);
       caps[codec] = CodecCapability(
-        supported: webrtcSupported.contains(codec),
-        hardware: hwMap[codec.name] == true,
+        supported: webrtcSupported.contains(codec) || nativeHwSupported,
+        hardware: isHw,
       );
     }
 
@@ -248,6 +311,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
     _activeTouchSlots.clear();
     _touchSequence = 0;
+    _connectedHostIp = ip;
 
     // Connect UDP for Stylus Data
     _client?.dispose();
@@ -304,6 +368,20 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     if (type == 'codec_mode') {
       final codec = videoCodecPreferenceFromName(message['codec'] as String?);
       _setVideoCodec(codec, notifyPeer: false);
+      return;
+    }
+
+    if (type == 'stream_mode') {
+      final mode = message['mode'] as String?;
+      if (mode == 'native_hw') {
+        final port = (message['port'] as num?)?.toInt() ?? 4002;
+        await _peerConnection?.close();
+        _peerConnection = null;
+        _remoteRenderer.srcObject = null;
+        await _startNativeVideo(port);
+      } else {
+        await _stopNativeVideo();
+      }
       return;
     }
 
@@ -402,6 +480,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   }
 
   void _closeWebRtc() {
+    _stopNativeVideo();
     _peerConnection?.close();
     _peerConnection = null;
     _signaler?.stop();
@@ -442,7 +521,13 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
 
     double videoWidth = 16.0;
     double videoHeight = 9.0;
-    if (_remoteRenderer.value.width > 0 && _remoteRenderer.value.height > 0) {
+    if (_usingNativeHwStream &&
+        _nativeVideoWidth > 0 &&
+        _nativeVideoHeight > 0) {
+      videoWidth = _nativeVideoWidth.toDouble();
+      videoHeight = _nativeVideoHeight.toDouble();
+    } else if (_remoteRenderer.value.width > 0 &&
+        _remoteRenderer.value.height > 0) {
       videoWidth = _remoteRenderer.value.width.toDouble();
       videoHeight = _remoteRenderer.value.height.toDouble();
     }
@@ -744,6 +829,23 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
           content: StatefulBuilder(
             builder: (context, setDialogState) {
               dialogStatsTimer ??= Timer.periodic(const Duration(seconds: 1), (_) async {
+                if (_usingNativeHwStream) {
+                  try {
+                    final raw = await _deviceChannel.invokeMethod('getNativeVideoStats');
+                    if (raw is Map && context.mounted) {
+                      final fps = (raw['fps'] as num?)?.toInt() ?? 0;
+                      final w = (raw['width'] as num?)?.toInt() ?? 0;
+                      final h = (raw['height'] as num?)?.toInt() ?? 0;
+                      final codec = raw['codec']?.toString() ?? '';
+                      final dec = raw['decoder']?.toString() ?? '';
+                      final label = dec.isNotEmpty ? '$codec ($dec)' : codec;
+                      setDialogState(() {
+                        liveStats = '$fps fps • ${w}x$h • $label';
+                      });
+                    }
+                  } catch (_) {}
+                  return;
+                }
                 final pc = _peerConnection;
                 if (pc == null) return;
                 final s = await readVideoStatsSummary(pc, inbound: true);
@@ -917,7 +1019,24 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
           builder: (context, constraints) {
             return Stack(
               children: [
-                if (_mirrorScreen && _remoteRenderer.srcObject != null)
+                if (_mirrorScreen &&
+                    _usingNativeHwStream &&
+                    _nativeTextureId != null)
+                  Positioned.fill(
+                    child: Center(
+                      child: AspectRatio(
+                        aspectRatio: (_nativeVideoWidth > 0 &&
+                                _nativeVideoHeight > 0)
+                            ? _nativeVideoWidth / _nativeVideoHeight
+                            : 16.0 / 9.0,
+                        child: Texture(
+                          textureId: _nativeTextureId!,
+                          filterQuality: FilterQuality.low,
+                        ),
+                      ),
+                    ),
+                  )
+                else if (_mirrorScreen && _remoteRenderer.srcObject != null)
                   Positioned.fill(
                     child: RTCVideoView(
                       _remoteRenderer,

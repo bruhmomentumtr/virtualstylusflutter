@@ -23,8 +23,9 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   static const MethodChannel _channel = MethodChannel('com.virtualstylus/pen');
   String _localIp = 'Loading...';
 
-  // WebRTC
+  // Video Streaming (Native HW DXGI+MF primary, WebRTC fallback)
   bool _enableScreenMirroring = true;
+  bool _usingNativeHwStream = false;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
   VideoCodecPreference _videoCodec = VideoCodecPreference.auto;
@@ -44,6 +45,66 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       _videoCodec == VideoCodecPreference.auto
           ? resolveAutoCodec(_codecCapabilities, _tabletCodecCapabilities)
           : _videoCodec;
+
+  bool get _shouldUseNativeHwStream {
+    final codec = _effectiveCodec;
+    if (codec != VideoCodecPreference.h264 && codec != VideoCodecPreference.h265) {
+      return false;
+    }
+    return _codecCapabilities[codec]?.hardware == true;
+  }
+
+  Map<String, dynamic> _buildHwStreamArgs() {
+    final cfg = _activeQualityConfig;
+    int targetHeight = 0;
+    if (_qualityMode == StreamQualityMode.performance) {
+      targetHeight = 720;
+    } else if (_qualityMode == StreamQualityMode.manual) {
+      targetHeight = _manualSettings.targetHeight;
+    }
+    return {
+      'useHevc': _effectiveCodec == VideoCodecPreference.h265,
+      'targetHeight': targetHeight,
+      'fps': cfg.maxFramerate,
+      'maxMbps': (cfg.maxBitrateKbps / 1000).round().clamp(2, 40),
+      'port': 4002,
+    };
+  }
+
+  Future<void> _stopHwStream() async {
+    _usingNativeHwStream = false;
+    try {
+      await _channel.invokeMethod('stopHwStream');
+    } catch (_) {}
+  }
+
+  Future<void> _startMirroringSession() async {
+    if (!_enableScreenMirroring || _connectedIp == null) return;
+    if (_shouldUseNativeHwStream) {
+      _closeWebRtc();
+      try {
+        await _channel.invokeMethod('startHwStream', _buildHwStreamArgs());
+        _usingNativeHwStream = true;
+        _signaler?.sendMessage({
+          'type': 'stream_mode',
+          'mode': 'native_hw',
+          'port': 4002,
+        });
+        _startStatsPolling();
+        return;
+      } catch (e) {
+        debugPrint('Failed to start Native HW stream, falling back to WebRTC: $e');
+        _usingNativeHwStream = false;
+      }
+    }
+
+    await _stopHwStream();
+    _signaler?.sendMessage({
+      'type': 'stream_mode',
+      'mode': 'webrtc',
+    });
+    await _setupWebRtcAndSendOffer();
+  }
 
   StreamQualityConfig get _activeQualityConfig => _qualityMode.resolveConfig(
         manual: _manualSettings,
@@ -130,9 +191,15 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     final caps = <VideoCodecPreference, CodecCapability>{};
     for (final codec in VideoCodecPreference.values) {
       if (codec == VideoCodecPreference.auto) continue;
+      final isHw = hwMap[codec.name] == true;
+      // Native DXGI+MediaFoundation streamer supports H264 and H265 (HEVC)
+      // directly in hardware even when libwebrtc doesn't expose H265.
+      final nativeHwSupported = isHw &&
+          (codec == VideoCodecPreference.h264 ||
+              codec == VideoCodecPreference.h265);
       caps[codec] = CodecCapability(
-        supported: webrtcSupported.contains(codec),
-        hardware: hwMap[codec.name] == true,
+        supported: webrtcSupported.contains(codec) || nativeHwSupported,
+        hardware: isHw,
       );
     }
 
@@ -205,11 +272,16 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       });
     }
 
-    // Codec changes require fresh SDP negotiation; cleanly restart WebRTC
-    // when connected so the newly selected codec takes effect immediately.
     if (changed && _connectedIp != null && _enableScreenMirroring) {
-      _closeWebRtc();
-      await _setupWebRtcAndSendOffer();
+      if (_shouldUseNativeHwStream && _usingNativeHwStream) {
+        try {
+          await _channel.invokeMethod('updateHwStream', _buildHwStreamArgs());
+        } catch (e) {
+          debugPrint('Failed to update HW stream codec: $e');
+        }
+      } else {
+        await _startMirroringSession();
+      }
     }
   }
 
@@ -235,7 +307,13 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     await prefs.setInt('manualFps', nextManual.fps);
     await prefs.setInt('manualMaxMbps', nextManual.maxMbps);
 
-    if (_peerConnection != null) {
+    if (_usingNativeHwStream) {
+      try {
+        await _channel.invokeMethod('updateHwStream', _buildHwStreamArgs());
+      } catch (e) {
+        debugPrint('Failed to update HW stream quality: $e');
+      }
+    } else if (_peerConnection != null) {
       final cfg = _activeQualityConfig;
       if (cfg.maxFramerate != _currentCaptureFps) {
         await _restartCaptureForFps(cfg.maxFramerate);
@@ -327,10 +405,11 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         });
         _server.lockedIp = ip;
         _sendCodecCapabilitiesToPeer();
-        _setupWebRtcAndSendOffer();
+        _startMirroringSession();
       },
       onDisconnect: () {
         _clearTouches();
+        _stopHwStream();
         setState(() {
           _connectedIp = null;
           _tabletCodecCapabilities = {};
@@ -347,6 +426,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   void _stopSignalingServer() {
     _signaler?.stop();
     _signaler = null;
+    _stopHwStream();
     _closeWebRtc();
   }
 
@@ -413,6 +493,25 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   void _startStatsPolling() {
     _statsTimer?.cancel();
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      if (_usingNativeHwStream) {
+        try {
+          final raw = await _channel.invokeMethod('getHwStreamStats');
+          if (raw is Map && mounted) {
+            final fps = (raw['fps'] as num?)?.toDouble() ?? 0.0;
+            final w = (raw['width'] as num?)?.toInt() ?? 0;
+            final h = (raw['height'] as num?)?.toInt() ?? 0;
+            final hevc = raw['hevc'] == true;
+            final encMs = (raw['encodeMs'] as num?)?.toDouble() ?? 0.0;
+            final mbps = (raw['mbps'] as num?)?.toDouble() ?? 0.0;
+            final codecLabel = hevc ? 'H265 HW' : 'H264 HW';
+            setState(() {
+              _liveStatsSummary =
+                  '${fps.round()} fps • ${w}x$h • $codecLabel • ${encMs.toStringAsFixed(1)}ms enc • ${mbps.toStringAsFixed(1)} Mbps';
+            });
+          }
+        } catch (_) {}
+        return;
+      }
       final pc = _peerConnection;
       if (pc == null) return;
       final summary = await readVideoStatsSummary(pc, inbound: false);

@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 
+#include "hw_video_streamer.h"
 #include "win32_window.h"
 
 // A window that does nothing but host a Flutter view.
@@ -69,6 +70,8 @@ class FlutterWindow : public Win32Window {
   bool has_touch_seq_ = false;
   uint16_t last_touch_seq_ = 0;
   ULONGLONG last_touch_tick_ = 0;
+
+  HwVideoStreamer hw_video_streamer_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

@@ -435,6 +435,60 @@ bool FlutterWindow::OnCreate() {
           result->Success(flutter::EncodableValue(encoders));
           return;
         }
+        if (call.method_name() == "startHwStream" ||
+            call.method_name() == "updateHwStream") {
+          const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
+          HwVideoStreamer::Config cfg;
+          int port = 4002;
+          if (args) {
+            auto readInt = [&](const char* key, int def) -> int {
+              auto it = args->find(flutter::EncodableValue(key));
+              if (it != args->end()) {
+                if (const auto* v = std::get_if<int>(&it->second)) return *v;
+              }
+              return def;
+            };
+            auto readBool = [&](const char* key, bool def) -> bool {
+              auto it = args->find(flutter::EncodableValue(key));
+              if (it != args->end()) {
+                if (const auto* v = std::get_if<bool>(&it->second)) return *v;
+              }
+              return def;
+            };
+            cfg.use_hevc = readBool("useHevc", false);
+            cfg.target_height = readInt("targetHeight", 0);
+            cfg.fps = readInt("fps", 60);
+            cfg.max_mbps = readInt("maxMbps", 12);
+            port = readInt("port", 4002);
+          }
+          if (call.method_name() == "startHwStream") {
+            hw_video_streamer_.Start(cfg, static_cast<uint16_t>(port));
+          } else {
+            hw_video_streamer_.UpdateConfig(cfg);
+          }
+          result->Success();
+          return;
+        }
+        if (call.method_name() == "stopHwStream") {
+          hw_video_streamer_.Stop();
+          result->Success();
+          return;
+        }
+        if (call.method_name() == "getHwStreamStats") {
+          const auto st = hw_video_streamer_.GetStats();
+          flutter::EncodableMap map;
+          map[flutter::EncodableValue("running")] = flutter::EncodableValue(st.running);
+          map[flutter::EncodableValue("clientConnected")] = flutter::EncodableValue(st.client_connected);
+          map[flutter::EncodableValue("hevc")] = flutter::EncodableValue(st.hevc);
+          map[flutter::EncodableValue("width")] = flutter::EncodableValue(st.width);
+          map[flutter::EncodableValue("height")] = flutter::EncodableValue(st.height);
+          map[flutter::EncodableValue("fps")] = flutter::EncodableValue(st.fps);
+          map[flutter::EncodableValue("encodeMs")] = flutter::EncodableValue(st.encode_ms);
+          map[flutter::EncodableValue("mbps")] = flutter::EncodableValue(st.mbps);
+          map[flutter::EncodableValue("encoderName")] = flutter::EncodableValue(st.encoder_name);
+          result->Success(flutter::EncodableValue(map));
+          return;
+        }
         if (call.method_name() == "injectPenEvent") {
           const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
           if (!args) {
@@ -616,6 +670,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  hw_video_streamer_.Stop();
   ClearAllTouches();
   if (pointer_device_ != nullptr) {
     DestroySyntheticPointerDevice(pointer_device_);
