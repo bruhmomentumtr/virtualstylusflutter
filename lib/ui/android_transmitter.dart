@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -71,17 +72,24 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   int _touchSequence = 0;
 
   // WebRTC
+  static const MethodChannel _deviceChannel = MethodChannel('com.virtualstylus/device');
   bool _mirrorScreen = true;
   StreamQualityMode _qualityMode = StreamQualityMode.balanced;
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
   VideoCodecPreference _videoCodec = VideoCodecPreference.auto;
-  Map<VideoCodecPreference, CodecCapability> _codecCapabilities = {};
+  Map<VideoCodecPreference, CodecCapability> _pcCodecCapabilities = {};
+  Map<VideoCodecPreference, CodecCapability> _tabletCodecCapabilities = {};
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
   StreamQualityConfig get _activeQualityConfig =>
       _qualityMode.resolveConfig(manual: _manualSettings);
+
+  VideoCodecPreference get _effectiveCodec =>
+      _videoCodec == VideoCodecPreference.auto
+          ? resolveAutoCodec(_pcCodecCapabilities, _tabletCodecCapabilities)
+          : _videoCodec;
 
   int? _allocateTouchSlot(int flutterPointer) {
     final existing = _activeTouchSlots[flutterPointer];
@@ -115,7 +123,54 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
   void initState() {
     super.initState();
     _loadPrefs();
+    _detectTabletCodecCapabilities();
     _remoteRenderer.initialize();
+  }
+
+  Future<void> _detectTabletCodecCapabilities() async {
+    Map<String, bool> hwMap = {};
+    try {
+      final raw = await _deviceChannel.invokeMethod('getHardwareDecoders');
+      if (raw is Map) {
+        for (final entry in raw.entries) {
+          hwMap[entry.key.toString()] = entry.value == true;
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to query tablet hardware decoders: $e');
+    }
+
+    final webrtcSupported = await probeWebRtcVideoCodecs();
+    final caps = <VideoCodecPreference, CodecCapability>{};
+    for (final codec in VideoCodecPreference.values) {
+      if (codec == VideoCodecPreference.auto) continue;
+      caps[codec] = CodecCapability(
+        supported: webrtcSupported.contains(codec),
+        hardware: hwMap[codec.name] == true,
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _tabletCodecCapabilities = caps;
+      });
+    } else {
+      _tabletCodecCapabilities = caps;
+    }
+
+    _sendTabletCodecCapabilitiesToPeer();
+  }
+
+  void _sendTabletCodecCapabilitiesToPeer() {
+    if (_signaler == null || _tabletCodecCapabilities.isEmpty) return;
+    final serialized = <String, dynamic>{};
+    for (final entry in _tabletCodecCapabilities.entries) {
+      serialized[entry.key.name] = entry.value.toMap();
+    }
+    _signaler?.sendMessage({
+      'type': 'tablet_codec_capabilities',
+      'capabilities': serialized,
+    });
   }
 
   Future<void> _loadPrefs() async {
@@ -219,6 +274,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
           'mode': _qualityMode.name,
           'manual': _manualSettings.toMap(),
         });
+        _sendTabletCodecCapabilitiesToPeer();
       },
       onMessage: _handleSignalingMessage,
       onDisconnect: _closeWebRtc,
@@ -265,7 +321,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       }
       final pcCodec = message['codec'] as String?;
       setState(() {
-        _codecCapabilities = parsed;
+        _pcCodecCapabilities = parsed;
         if (pcCodec != null) {
           _videoCodec = videoCodecPreferenceFromName(pcCodec);
         }
@@ -282,7 +338,8 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       _remoteCandidates.clear();
 
       final configuration = {
-        "iceServers": []
+        "iceServers": [],
+        "sdpSemantics": "unified-plan",
       };
 
       _peerConnection = await createPeerConnection(configuration);
@@ -324,7 +381,7 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
       final optimizedSdp = optimizeVideoSdp(
         rawAnswer.sdp ?? '',
         _activeQualityConfig,
-        codecPreference: _videoCodec,
+        codecPreference: _effectiveCodec,
       );
       final answer = RTCSessionDescription(optimizedSdp, rawAnswer.type);
       await _peerConnection!.setLocalDescription(answer);
@@ -571,13 +628,39 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     required VideoCodecPreference selectedCodec,
     required ValueChanged<VideoCodecPreference> onSelected,
   }) {
+    Widget buildSideBadge(String prefix, CodecCapability? cap, bool selected) {
+      final text = cap == null ? '$prefix:...' : '$prefix:${cap.badge}';
+      final color = cap == null
+          ? Colors.white38
+          : (!cap.supported
+              ? Colors.white24
+              : (cap.hardware ? Colors.greenAccent : Colors.amberAccent));
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+        decoration: BoxDecoration(
+          color: selected ? Colors.black.withOpacity(0.25) : color.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: selected ? Colors.white : color,
+            fontSize: 9,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Text(
-          'Video Codec',
-          style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
+        Text(
+          _pcCodecCapabilities.isNotEmpty
+              ? 'Video Codec (PC Enc • Tablet Dec)'
+              : 'Video Codec (Tablet Dec)',
+          style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 6),
         Wrap(
@@ -585,14 +668,15 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
           runSpacing: 6,
           children: VideoCodecPreference.values.map((codec) {
             final selected = selectedCodec == codec;
-            final cap = _codecCapabilities[codec];
+            final pcCap = _pcCodecCapabilities[codec];
+            final tabCap = _tabletCodecCapabilities[codec];
             final isAuto = codec == VideoCodecPreference.auto;
-            final supported = isAuto || (cap?.supported ?? true);
-            final isHw = !isAuto && (cap?.hardware == true);
-            final badgeText = isAuto || cap == null ? null : cap.badge;
-            final badgeColor = !supported
-                ? Colors.white24
-                : (isHw ? Colors.greenAccent : Colors.amberAccent);
+            final pcSupported = isAuto || (pcCap?.supported ?? true);
+            final tabSupported = isAuto || (tabCap?.supported ?? true);
+            final supported = pcSupported && tabSupported;
+            final bothHw = !isAuto &&
+                (pcCap?.supported == true && pcCap?.hardware == true) &&
+                (tabCap?.supported == true && tabCap?.hardware == true);
 
             return InkWell(
               onTap: supported ? () => onSelected(codec) : null,
@@ -608,7 +692,9 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                   border: Border.all(
                     color: selected
                         ? Colors.blueAccent
-                        : Colors.white.withOpacity(supported ? 0.1 : 0.04),
+                        : (bothHw
+                            ? Colors.greenAccent.withOpacity(0.55)
+                            : Colors.white.withOpacity(supported ? 0.1 : 0.04)),
                   ),
                 ),
                 child: Row(
@@ -624,25 +710,13 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
                         fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                       ),
                     ),
-                    if (badgeText != null) ...[
-                      const SizedBox(width: 5),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: selected
-                              ? Colors.black.withOpacity(0.25)
-                              : badgeColor.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          badgeText,
-                          style: TextStyle(
-                            color: selected ? Colors.white : badgeColor,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
+                    if (!isAuto) ...[
+                      if (_pcCodecCapabilities.isNotEmpty) ...[
+                        const SizedBox(width: 5),
+                        buildSideBadge('PC', pcCap, selected),
+                      ],
+                      const SizedBox(width: 4),
+                      buildSideBadge('Tab', tabCap, selected),
                     ],
                   ],
                 ),
@@ -658,6 +732,8 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
     StreamQualityMode dialogMode = _qualityMode;
     ManualStreamSettings dialogManual = _manualSettings;
     VideoCodecPreference dialogCodec = _videoCodec;
+    String? liveStats;
+    Timer? dialogStatsTimer;
 
     showDialog(
       context: context,
@@ -667,12 +743,36 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
           title: const Text('Stream Quality & Codec', style: TextStyle(color: Colors.white)),
           content: StatefulBuilder(
             builder: (context, setDialogState) {
+              dialogStatsTimer ??= Timer.periodic(const Duration(seconds: 1), (_) async {
+                final pc = _peerConnection;
+                if (pc == null) return;
+                final s = await readVideoStatsSummary(pc, inbound: true);
+                if (s != null && context.mounted) {
+                  setDialogState(() => liveStats = s);
+                }
+              });
               final resolved = dialogMode.resolveConfig(manual: dialogManual);
               return SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (liveStats != null) ...[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.greenAccent.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.greenAccent.withOpacity(0.3)),
+                        ),
+                        child: Text(
+                          liveStats!,
+                          style: const TextStyle(color: Colors.greenAccent, fontSize: 11, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
                     Wrap(
                       spacing: 6,
                       runSpacing: 6,
@@ -728,7 +828,9 @@ class _AndroidTransmitterScreenState extends State<AndroidTransmitterScreen> {
           ],
         );
       },
-    );
+    ).whenComplete(() {
+      dialogStatsTimer?.cancel();
+    });
   }
 
   void _addNewShortcut() {

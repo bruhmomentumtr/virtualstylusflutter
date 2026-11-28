@@ -223,7 +223,7 @@ extension StreamQualityModeExt on StreamQualityMode {
           shortLabel: 'Perf',
           description: 'Lowest latency • 60 FPS • 6 Mbps',
           startBitrateKbps: 3000,
-          minBitrateKbps: 1500,
+          minBitrateKbps: 1000,
           maxBitrateKbps: 6000,
           maxFramerate: 60,
           scaleResolutionDownBy: 1.5,
@@ -235,19 +235,19 @@ extension StreamQualityModeExt on StreamQualityMode {
           shortLabel: 'Bal',
           description: 'Native res • 60 FPS • 12 Mbps',
           startBitrateKbps: 6000,
-          minBitrateKbps: 3000,
+          minBitrateKbps: 1500,
           maxBitrateKbps: 12000,
           maxFramerate: 60,
           scaleResolutionDownBy: 1.0,
-          degradationPreference: RTCDegradationPreference.MAINTAIN_RESOLUTION,
+          degradationPreference: RTCDegradationPreference.MAINTAIN_FRAMERATE,
         );
       case StreamQualityMode.quality:
         return const StreamQualityConfig(
           label: 'Quality',
           shortLabel: 'HQ',
           description: 'Native res • 60 FPS • 25 Mbps',
-          startBitrateKbps: 12000,
-          minBitrateKbps: 6000,
+          startBitrateKbps: 10000,
+          minBitrateKbps: 2500,
           maxBitrateKbps: 25000,
           maxFramerate: 60,
           scaleResolutionDownBy: 1.0,
@@ -259,8 +259,8 @@ extension StreamQualityModeExt on StreamQualityMode {
           scale = (sourceHeight / manual.targetHeight).clamp(1.0, 4.0);
         }
         final int maxKbps = manual.maxMbps.clamp(2, 40) * 1000;
-        final int startKbps = (maxKbps * 0.65).round().clamp(1000, maxKbps);
-        final int minKbps = (maxKbps * 0.35).round().clamp(500, startKbps);
+        final int startKbps = (maxKbps * 0.6).round().clamp(1000, maxKbps);
+        final int minKbps = (maxKbps * 0.2).round().clamp(500, startKbps);
         return StreamQualityConfig(
           label: 'Manual',
           shortLabel: 'Man',
@@ -271,7 +271,7 @@ extension StreamQualityModeExt on StreamQualityMode {
           maxBitrateKbps: maxKbps,
           maxFramerate: manual.fps.clamp(15, 120),
           scaleResolutionDownBy: scale,
-          degradationPreference: RTCDegradationPreference.MAINTAIN_RESOLUTION,
+          degradationPreference: RTCDegradationPreference.MAINTAIN_FRAMERATE,
         );
     }
   }
@@ -446,6 +446,37 @@ String optimizeVideoSdp(
   }
 }
 
+/// Picks the best mutually-supported codec when Auto is selected:
+/// prefers codecs where both PC and Tablet have HW support, otherwise falls
+/// back to VP8 (lowest software latency in libwebrtc).
+VideoCodecPreference resolveAutoCodec(
+  Map<VideoCodecPreference, CodecCapability> pcCaps,
+  Map<VideoCodecPreference, CodecCapability> tabletCaps,
+) {
+  const priority = [
+    VideoCodecPreference.h264,
+    VideoCodecPreference.vp8,
+    VideoCodecPreference.vp9,
+    VideoCodecPreference.h265,
+    VideoCodecPreference.av1,
+  ];
+  // 1) Both PC and Tablet support WebRTC + HW acceleration.
+  for (final codec in priority) {
+    final pc = pcCaps[codec];
+    final tab = tabletCaps[codec];
+    if (pc != null &&
+        pc.supported &&
+        pc.hardware &&
+        tab != null &&
+        tab.supported &&
+        tab.hardware) {
+      return codec;
+    }
+  }
+  // 2) Fallback to VP8 (zero-lookahead, lowest latency software encode).
+  return VideoCodecPreference.vp8;
+}
+
 /// Applies bitrate, framerate, resolution scaling, and degradation preference
 /// directly on active video RTCRtpSenders (works live without reconnecting).
 Future<void> applyVideoSenderParameters(
@@ -465,6 +496,7 @@ Future<void> applyVideoSenderParameters(
             maxBitrate: cfg.maxBitrateKbps * 1000,
             minBitrate: cfg.minBitrateKbps * 1000,
             maxFramerate: cfg.maxFramerate,
+            numTemporalLayers: 1,
             scaleResolutionDownBy: cfg.scaleResolutionDownBy,
             priority: RTCPriorityType.high,
             networkPriority: RTCPriorityType.high,
@@ -476,6 +508,7 @@ Future<void> applyVideoSenderParameters(
           enc.maxBitrate = cfg.maxBitrateKbps * 1000;
           enc.minBitrate = cfg.minBitrateKbps * 1000;
           enc.maxFramerate = cfg.maxFramerate;
+          enc.numTemporalLayers = 1;
           enc.scaleResolutionDownBy = cfg.scaleResolutionDownBy;
           enc.priority = RTCPriorityType.high;
           enc.networkPriority = RTCPriorityType.high;
@@ -487,5 +520,63 @@ Future<void> applyVideoSenderParameters(
   } catch (_) {
     // Some platform builds may ignore individual RTP parameters; SDP hints
     // still ensure fast ramp-up and high bitrate.
+  }
+}
+
+/// Reads a concise human-readable live video stats summary from WebRTC
+/// (e.g. "59 fps • 1920x1080 • VP8 (libvpx) • 12ms").
+Future<String?> readVideoStatsSummary(
+  RTCPeerConnection pc, {
+  required bool inbound,
+}) async {
+  try {
+    final reports = await pc.getStats();
+    Map<dynamic, dynamic>? rtpValues;
+    final codecsById = <String, String>{};
+
+    for (final report in reports) {
+      final type = report.type;
+      final values = report.values;
+      if (type == 'codec') {
+        final mime = values['mimeType']?.toString() ?? '';
+        if (mime.toLowerCase().startsWith('video/')) {
+          codecsById[report.id] = mime.substring(6).toUpperCase();
+        }
+      } else if ((inbound && type == 'inbound-rtp') ||
+          (!inbound && type == 'outbound-rtp')) {
+        final kind = (values['kind'] ?? values['mediaType'])?.toString();
+        if (kind == 'video') {
+          rtpValues = values;
+        }
+      }
+    }
+
+    if (rtpValues == null) return null;
+
+    final fpsNum = rtpValues['framesPerSecond'] as num?;
+    final wNum = rtpValues['frameWidth'] as num?;
+    final hNum = rtpValues['frameHeight'] as num?;
+    final codecId = rtpValues['codecId']?.toString();
+    final codecName = codecId != null ? codecsById[codecId] : null;
+    final impl = (inbound
+            ? rtpValues['decoderImplementation']
+            : rtpValues['encoderImplementation'])
+        ?.toString();
+    final jitterSec = rtpValues['jitter'] as num?;
+
+    final parts = <String>[];
+    if (fpsNum != null) parts.add('${fpsNum.round()} fps');
+    if (wNum != null && hNum != null && wNum > 0 && hNum > 0) {
+      parts.add('${wNum.round()}x${hNum.round()}');
+    }
+    if (codecName != null && codecName.isNotEmpty) {
+      parts.add(impl != null && impl.isNotEmpty ? '$codecName ($impl)' : codecName);
+    }
+    if (jitterSec != null) {
+      parts.add('jitter ${(jitterSec * 1000).round()}ms');
+    }
+    return parts.isEmpty ? null : parts.join(' • ');
+  } catch (_) {
+    return null;
   }
 }

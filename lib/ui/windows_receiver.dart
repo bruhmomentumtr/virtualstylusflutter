@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -28,13 +29,21 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   ManualStreamSettings _manualSettings = const ManualStreamSettings();
   VideoCodecPreference _videoCodec = VideoCodecPreference.auto;
   Map<VideoCodecPreference, CodecCapability> _codecCapabilities = {};
+  Map<VideoCodecPreference, CodecCapability> _tabletCodecCapabilities = {};
   int _captureSourceHeight = 1080;
   String? _captureSourceId;
   int _currentCaptureFps = 0;
   String? _connectedIp;
+  String? _liveStatsSummary;
+  Timer? _statsTimer;
   WebRtcSignaler? _signaler;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+
+  VideoCodecPreference get _effectiveCodec =>
+      _videoCodec == VideoCodecPreference.auto
+          ? resolveAutoCodec(_codecCapabilities, _tabletCodecCapabilities)
+          : _videoCodec;
 
   StreamQualityConfig get _activeQualityConfig => _qualityMode.resolveConfig(
         manual: _manualSettings,
@@ -324,6 +333,8 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         _clearTouches();
         setState(() {
           _connectedIp = null;
+          _tabletCodecCapabilities = {};
+          _liveStatsSummary = null;
         });
         _server.lockedIp = null;
         _closeWebRtc();
@@ -344,7 +355,8 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
     _remoteCandidates.clear();
     
     final configuration = {
-      "iceServers": [] // P2P local network, no stun needed
+      "iceServers": [], // P2P local network, no stun needed
+      "sdpSemantics": "unified-plan",
     };
 
     _peerConnection = await createPeerConnection(configuration);
@@ -380,7 +392,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         final optimizedSdp = optimizeVideoSdp(
           rawOffer.sdp ?? '',
           resolvedCfg,
-          codecPreference: _videoCodec,
+          codecPreference: _effectiveCodec,
         );
         final offer = RTCSessionDescription(optimizedSdp, rawOffer.type);
         await _peerConnection!.setLocalDescription(offer);
@@ -397,6 +409,18 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
 
   List<RTCIceCandidate> _remoteCandidates = [];
   bool _isRemoteSet = false;
+
+  void _startStatsPolling() {
+    _statsTimer?.cancel();
+    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      final pc = _peerConnection;
+      if (pc == null) return;
+      final summary = await readVideoStatsSummary(pc, inbound: false);
+      if (mounted && summary != null) {
+        setState(() => _liveStatsSummary = summary);
+      }
+    });
+  }
 
   void _handleSignalingMessage(Map<String, dynamic> message) async {
     final type = message['type'];
@@ -417,6 +441,27 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       await _setVideoCodec(codec, notifyPeer: false);
       return;
     }
+    if (type == 'tablet_codec_capabilities') {
+      final rawCaps = message['capabilities'];
+      final parsed = <VideoCodecPreference, CodecCapability>{};
+      if (rawCaps is Map) {
+        for (final entry in rawCaps.entries) {
+          final pref = videoCodecPreferenceFromName(entry.key.toString());
+          if (pref == VideoCodecPreference.auto) continue;
+          if (entry.value is Map) {
+            parsed[pref] = CodecCapability.fromMap(entry.value as Map);
+          }
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _tabletCodecCapabilities = parsed;
+        });
+      } else {
+        _tabletCodecCapabilities = parsed;
+      }
+      return;
+    }
 
     if (_peerConnection == null) return;
 
@@ -425,7 +470,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
       final optimizedAnswerSdp = optimizeVideoSdp(
         (message['sdp'] as String?) ?? '',
         resolvedCfg,
-        codecPreference: _videoCodec,
+        codecPreference: _effectiveCodec,
       );
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(optimizedAnswerSdp, type),
@@ -435,7 +480,13 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
         await _peerConnection!.addCandidate(cand);
       }
       _remoteCandidates.clear();
-      await applyVideoSenderParameters(_peerConnection!, resolvedCfg);
+      // Ensure capture FPS matches the latest synced mode (handles race when
+      // Android sends quality_mode while initial offer is still being created).
+      if (_activeQualityConfig.maxFramerate != _currentCaptureFps) {
+        await _restartCaptureForFps(_activeQualityConfig.maxFramerate);
+      }
+      await applyVideoSenderParameters(_peerConnection!, _activeQualityConfig);
+      _startStatsPolling();
     } else if (type == 'candidate') {
       final cand = RTCIceCandidate(message['candidate'], message['sdpMid'], message['sdpMLineIndex']);
       if (_isRemoteSet) {
@@ -447,6 +498,8 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
   }
 
   void _closeWebRtc() {
+    _statsTimer?.cancel();
+    _statsTimer = null;
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
     _localStream = null;
@@ -737,7 +790,7 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                         ],
                         const SizedBox(height: 16),
                         const Text(
-                          'Video Codec (PC Encoder)',
+                          'Video Codec (PC Enc • Tablet Dec)',
                           style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 8),
@@ -747,16 +800,41 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                           alignment: WrapAlignment.center,
                           children: VideoCodecPreference.values.map((codec) {
                             final selected = _videoCodec == codec;
-                            final cap = _codecCapabilities[codec];
+                            final pcCap = _codecCapabilities[codec];
+                            final tabCap = _tabletCodecCapabilities[codec];
                             final isAuto = codec == VideoCodecPreference.auto;
-                            final supported = isAuto || (cap?.supported ?? true);
-                            final isHw = !isAuto && (cap?.hardware == true);
-                            final badgeText = isAuto
-                                ? null
-                                : (cap == null ? '...' : cap.badge);
-                            final badgeColor = !supported
-                                ? Colors.white24
-                                : (isHw ? Colors.greenAccent : Colors.amberAccent);
+                            final pcSupported = isAuto || (pcCap?.supported ?? true);
+                            final tabSupported = isAuto || (tabCap?.supported ?? true);
+                            final supported = pcSupported && tabSupported;
+                            final bothHw = !isAuto &&
+                                (pcCap?.supported == true && pcCap?.hardware == true) &&
+                                (tabCap?.supported == true && tabCap?.hardware == true);
+
+                            Widget buildSideBadge(String prefix, CodecCapability? cap) {
+                              final text = cap == null ? '$prefix:...' : '$prefix:${cap.badge}';
+                              final color = cap == null
+                                  ? Colors.white38
+                                  : (!cap.supported
+                                      ? Colors.white24
+                                      : (cap.hardware ? Colors.greenAccent : Colors.amberAccent));
+                              return Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: selected
+                                      ? Colors.black.withOpacity(0.25)
+                                      : color.withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  text,
+                                  style: TextStyle(
+                                    color: selected ? Colors.white : color,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              );
+                            }
 
                             return InkWell(
                               onTap: supported ? () => _setVideoCodec(codec) : null,
@@ -772,7 +850,9 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                                   border: Border.all(
                                     color: selected
                                         ? Colors.blueAccent
-                                        : Colors.white.withOpacity(supported ? 0.1 : 0.04),
+                                        : (bothHw
+                                            ? Colors.greenAccent.withOpacity(0.55)
+                                            : Colors.white.withOpacity(supported ? 0.1 : 0.04)),
                                   ),
                                 ),
                                 child: Row(
@@ -788,25 +868,13 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                                         fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                                       ),
                                     ),
-                                    if (badgeText != null) ...[
+                                    if (!isAuto) ...[
                                       const SizedBox(width: 5),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: selected
-                                              ? Colors.black.withOpacity(0.25)
-                                              : badgeColor.withOpacity(0.15),
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
-                                        child: Text(
-                                          badgeText,
-                                          style: TextStyle(
-                                            color: selected ? Colors.white : badgeColor,
-                                            fontSize: 9,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                      ),
+                                      buildSideBadge('PC', pcCap),
+                                      if (_tabletCodecCapabilities.isNotEmpty) ...[
+                                        const SizedBox(width: 3),
+                                        buildSideBadge('Tab', tabCap),
+                                      ],
                                     ],
                                   ],
                                 ),
@@ -814,6 +882,13 @@ class _WindowsReceiverScreenState extends State<WindowsReceiverScreen> {
                             );
                           }).toList(),
                         ),
+                        if (_liveStatsSummary != null) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            _liveStatsSummary!,
+                            style: const TextStyle(color: Colors.greenAccent, fontSize: 11),
+                          ),
+                        ],
                       ],
                     ],
                   ),
