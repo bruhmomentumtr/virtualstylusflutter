@@ -126,6 +126,7 @@ struct HwPipeline {
   bool is_async = false;
   bool use_d3d_input = false;
   bool hevc = false;
+  int pending_need_input = 0;
   int src_w = 0;
   int src_h = 0;
   int enc_w = 0;
@@ -135,7 +136,7 @@ struct HwPipeline {
   std::string encoder_name;
   int64_t frame_index = 0;
 
-  void Shutdown() {
+  void ResetEncoderOnly() {
     if (encoder) {
       encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
       encoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -147,6 +148,14 @@ struct HwPipeline {
       encoder_activate->ShutdownObject();
       encoder_activate.Reset();
     }
+    is_async = false;
+    use_d3d_input = false;
+    pending_need_input = 0;
+    encoder_name.clear();
+  }
+
+  void Shutdown() {
+    ResetEncoderOnly();
     dxgi_manager.Reset();
     nv12_staging.Reset();
     nv12_out_view.Reset();
@@ -159,6 +168,127 @@ struct HwPipeline {
     output1.Reset();
     context.Reset();
     device.Reset();
+  }
+
+  bool TryConfigureEncoderMft(IMFActivate* activate, const GUID& out_subtype) {
+    ResetEncoderOnly();
+    ComPtr<IMFTransform> candidate;
+    if (FAILED(activate->ActivateObject(IID_PPV_ARGS(&candidate))) ||
+        !candidate) {
+      return false;
+    }
+    encoder = candidate;
+    encoder_activate = activate;
+
+    UINT32 name_len = 0;
+    if (SUCCEEDED(activate->GetStringLength(MFT_FRIENDLY_NAME_Attribute,
+                                            &name_len)) &&
+        name_len > 0) {
+      std::wstring wname(name_len + 1, L'\0');
+      if (SUCCEEDED(activate->GetString(MFT_FRIENDLY_NAME_Attribute,
+                                        wname.data(), name_len + 1,
+                                        &name_len))) {
+        wname.resize(name_len);
+        encoder_name = WideToUtf8(wname);
+      }
+    }
+
+    // Unlock async MFT (required for Intel QSV, AMD AMF, and most NVENC MFTs).
+    ComPtr<IMFAttributes> mft_attrs;
+    if (SUCCEEDED(encoder->GetAttributes(&mft_attrs)) && mft_attrs) {
+      UINT32 async_flag = 0;
+      if (SUCCEEDED(mft_attrs->GetUINT32(MF_TRANSFORM_ASYNC, &async_flag)) &&
+          async_flag != 0) {
+        is_async = true;
+        mft_attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+        encoder.As(&event_gen);
+      }
+    }
+
+    // Try zero-copy D3D11 device manager first; if this MFT lives on a
+    // different GPU adapter (hybrid laptops), we fall back to CPU NV12 below.
+    if (dxgi_manager) {
+      HRESULT d3d_hr = encoder->ProcessMessage(
+          MFT_MESSAGE_SET_D3D_MANAGER,
+          reinterpret_cast<ULONG_PTR>(dxgi_manager.Get()));
+      use_d3d_input = SUCCEEDED(d3d_hr);
+    }
+
+    // Configure low-latency encoding via ICodecAPI (best-effort across vendors).
+    if (SUCCEEDED(encoder.As(&codec_api)) && codec_api) {
+      VARIANT v = {};
+      v.vt = VT_BOOL;
+      v.boolVal = VARIANT_TRUE;
+      codec_api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+
+      v.vt = VT_UI4;
+      v.ulVal = eAVEncCommonRateControlMode_CBR;
+      codec_api->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
+
+      v.vt = VT_UI4;
+      v.ulVal = static_cast<ULONG>(bitrate_bps);
+      codec_api->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
+
+      // Zero B-frames for minimum latency on NVIDIA, Intel QSV, and AMD AMF.
+      v.vt = VT_UI4;
+      v.ulVal = 0;
+      codec_api->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &v);
+
+      v.vt = VT_UI4;
+      v.ulVal = static_cast<ULONG>(fps * 2);
+      codec_api->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
+    }
+
+    auto configureTypes = [&]() -> bool {
+      ComPtr<IMFMediaType> out_type;
+      if (FAILED(MFCreateMediaType(&out_type))) return false;
+      out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+      out_type->SetGUID(MF_MT_SUBTYPE, out_subtype);
+      out_type->SetUINT32(MF_MT_AVG_BITRATE, static_cast<UINT32>(bitrate_bps));
+      out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      if (!hevc) {
+        out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+      }
+      MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE,
+                         static_cast<UINT32>(enc_w),
+                         static_cast<UINT32>(enc_h));
+      MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE,
+                          static_cast<UINT32>(fps), 1);
+      MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+      if (FAILED(encoder->SetOutputType(0, out_type.Get(), 0))) return false;
+
+      ComPtr<IMFMediaType> in_type;
+      if (FAILED(MFCreateMediaType(&in_type))) return false;
+      in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+      in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+      in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE,
+                         static_cast<UINT32>(enc_w),
+                         static_cast<UINT32>(enc_h));
+      MFSetAttributeRatio(in_type.Get(), MF_MT_FRAME_RATE,
+                          static_cast<UINT32>(fps), 1);
+      MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+      return SUCCEEDED(encoder->SetInputType(0, in_type.Get(), 0));
+    };
+
+    if (!configureTypes()) {
+      if (use_d3d_input) {
+        // Hybrid GPU fallback: detach D3D manager and retry with CPU NV12 input.
+        encoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0);
+        use_d3d_input = false;
+        if (!configureTypes()) {
+          ResetEncoderOnly();
+          return false;
+        }
+      } else {
+        ResetEncoderOnly();
+        return false;
+      }
+    }
+
+    encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    return true;
   }
 
   bool RecreateDuplication() {
@@ -279,7 +409,8 @@ struct HwPipeline {
       dxgi_manager->ResetDevice(device.Get(), reset_token);
     }
 
-    // 5. Enumerate and activate hardware video encoder MFT (H.264 or HEVC).
+    // 5. Enumerate and configure the first working hardware encoder MFT
+    // (works across NVIDIA NVENC, Intel QuickSync, and AMD AMF).
     const GUID out_subtype = hevc
                                  ? MakeVideoSubtype(MakeFourCC('H', 'E', 'V', 'C'))
                                  : MakeVideoSubtype(MakeFourCC('H', '2', '6', '4'));
@@ -297,106 +428,17 @@ struct HwPipeline {
       return false;
     }
 
+    bool configured = false;
     for (UINT32 i = 0; i < count; ++i) {
       if (!activates[i]) continue;
-      if (!encoder) {
-        ComPtr<IMFTransform> candidate;
-        if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) &&
-            candidate) {
-          encoder = candidate;
-          encoder_activate = activates[i];
-          UINT32 name_len = 0;
-          if (SUCCEEDED(activates[i]->GetStringLength(
-                  MFT_FRIENDLY_NAME_Attribute, &name_len)) &&
-              name_len > 0) {
-            std::wstring wname(name_len + 1, L'\0');
-            if (SUCCEEDED(activates[i]->GetString(
-                    MFT_FRIENDLY_NAME_Attribute, wname.data(),
-                    name_len + 1, &name_len))) {
-              wname.resize(name_len);
-              encoder_name = WideToUtf8(wname);
-            }
-          }
-        }
+      if (!configured) {
+        configured = TryConfigureEncoderMft(activates[i], out_subtype);
       }
       activates[i]->Release();
     }
     CoTaskMemFree(activates);
-    if (!encoder) return false;
+    if (!configured) return false;
 
-    // Unlock async MFT if required.
-    ComPtr<IMFAttributes> mft_attrs;
-    if (SUCCEEDED(encoder->GetAttributes(&mft_attrs)) && mft_attrs) {
-      UINT32 async_flag = 0;
-      if (SUCCEEDED(mft_attrs->GetUINT32(MF_TRANSFORM_ASYNC, &async_flag)) &&
-          async_flag != 0) {
-        is_async = true;
-        mft_attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-        encoder.As(&event_gen);
-      }
-    }
-
-    if (dxgi_manager) {
-      HRESULT d3d_hr = encoder->ProcessMessage(
-          MFT_MESSAGE_SET_D3D_MANAGER,
-          reinterpret_cast<ULONG_PTR>(dxgi_manager.Get()));
-      use_d3d_input = SUCCEEDED(d3d_hr);
-    }
-
-    // Configure low-latency encoding via ICodecAPI before media types.
-    if (SUCCEEDED(encoder.As(&codec_api)) && codec_api) {
-      VARIANT v = {};
-      v.vt = VT_BOOL;
-      v.boolVal = VARIANT_TRUE;
-      codec_api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
-
-      v.vt = VT_UI4;
-      v.ulVal = eAVEncCommonRateControlMode_CBR;
-      codec_api->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
-
-      v.vt = VT_UI4;
-      v.ulVal = static_cast<ULONG>(bitrate_bps);
-      codec_api->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
-
-      // Zero B-frames for minimum latency.
-      v.vt = VT_UI4;
-      v.ulVal = 0;
-      codec_api->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &v);
-
-      v.vt = VT_UI4;
-      v.ulVal = static_cast<ULONG>(fps * 2);
-      codec_api->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
-    }
-
-    // 6. Set Output Media Type (H.264 or HEVC).
-    ComPtr<IMFMediaType> out_type;
-    if (FAILED(MFCreateMediaType(&out_type))) return false;
-    out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    out_type->SetGUID(MF_MT_SUBTYPE, out_subtype);
-    out_type->SetUINT32(MF_MT_AVG_BITRATE, static_cast<UINT32>(bitrate_bps));
-    out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(out_type.Get(), MF_MT_FRAME_SIZE,
-                       static_cast<UINT32>(enc_w), static_cast<UINT32>(enc_h));
-    MFSetAttributeRatio(out_type.Get(), MF_MT_FRAME_RATE,
-                        static_cast<UINT32>(fps), 1);
-    MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    if (FAILED(encoder->SetOutputType(0, out_type.Get(), 0))) return false;
-
-    // 7. Set Input Media Type (NV12).
-    ComPtr<IMFMediaType> in_type;
-    if (FAILED(MFCreateMediaType(&in_type))) return false;
-    in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-    in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(in_type.Get(), MF_MT_FRAME_SIZE,
-                       static_cast<UINT32>(enc_w), static_cast<UINT32>(enc_h));
-    MFSetAttributeRatio(in_type.Get(), MF_MT_FRAME_RATE,
-                        static_cast<UINT32>(fps), 1);
-    MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    if (FAILED(encoder->SetInputType(0, in_type.Get(), 0))) return false;
-
-    encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-    encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
     frame_index = 0;
     return true;
   }
@@ -554,14 +596,38 @@ struct HwPipeline {
 
     if (is_async && event_gen) {
       bool input_fed = false;
+      if (pending_need_input > 0) {
+        if (FAILED(encoder->ProcessInput(0, sample.Get(), 0))) return false;
+        --pending_need_input;
+        input_fed = true;
+      }
+
       for (int iter = 0; iter < 16; ++iter) {
+        // After feeding input, if we see a second METransformNeedInput (common
+        // on Intel QSV / AMD AMF during pipeline priming), record it and return
+        // without blocking so the next frame can be fed immediately.
         ComPtr<IMFMediaEvent> ev;
-        if (FAILED(event_gen->GetEvent(0, &ev)) || !ev) break;
+        const DWORD wait_flag = input_fed ? MF_EVENT_FLAG_NO_WAIT : 0;
+        HRESULT ev_hr = event_gen->GetEvent(wait_flag, &ev);
+        if (ev_hr == MF_E_NO_EVENTS_AVAILABLE) {
+          if (iter < 4) {
+            Sleep(1);
+            continue;
+          }
+          return false;
+        }
+        if (FAILED(ev_hr) || !ev) return false;
+
         MediaEventType met = MEUnknown;
         ev->GetType(&met);
-        if (met == METransformNeedInput && !input_fed) {
-          if (FAILED(encoder->ProcessInput(0, sample.Get(), 0))) return false;
-          input_fed = true;
+        if (met == METransformNeedInput) {
+          if (!input_fed) {
+            if (FAILED(encoder->ProcessInput(0, sample.Get(), 0))) return false;
+            input_fed = true;
+          } else {
+            ++pending_need_input;
+            return false;
+          }
         } else if (met == METransformHaveOutput) {
           if (PullEncodedOutput(out_bytes, is_keyframe)) {
             return true;
