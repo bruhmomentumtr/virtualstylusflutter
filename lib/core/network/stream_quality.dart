@@ -13,7 +13,15 @@ class CodecCapability {
     required this.hardware,
   });
 
-  String get badge => !supported ? 'N/A' : (hardware ? 'HW' : 'SW');
+  /// Badge text:
+  /// - `HW`: WebRTC supported + real GPU hardware acceleration
+  /// - `SW`: WebRTC supported (software/CPU)
+  /// - `HW*`: Real GPU hardware codec detected, but not exposed by WebRTC SDP
+  /// - `N/A`: Neither WebRTC nor hardware available
+  String get badge {
+    if (supported) return hardware ? 'HW' : 'SW';
+    return hardware ? 'HW*' : 'N/A';
+  }
 
   Map<String, dynamic> toMap() => {
         'supported': supported,

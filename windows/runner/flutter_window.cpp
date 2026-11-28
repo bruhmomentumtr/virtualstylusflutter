@@ -46,13 +46,26 @@ bool HasHardwareVideoEncoder(const GUID& subtype) {
   if (FAILED(hr) || activates == nullptr) {
     return false;
   }
+
+  // Verify at least one enumerated MFT actually activates on this GPU.
+  // Drivers often register stub MFTs for newer codecs (e.g., AV1/VP9) that
+  // return E_FAIL from ActivateObject when the silicon lacks that encoder.
+  bool found_working_hw = false;
   for (UINT32 i = 0; i < count; ++i) {
-    if (activates[i] != nullptr) {
-      activates[i]->Release();
+    if (activates[i] == nullptr) continue;
+    if (!found_working_hw) {
+      IMFTransform* transform = nullptr;
+      HRESULT act_hr = activates[i]->ActivateObject(IID_PPV_ARGS(&transform));
+      if (SUCCEEDED(act_hr) && transform != nullptr) {
+        found_working_hw = true;
+        transform->Release();
+        activates[i]->ShutdownObject();
+      }
     }
+    activates[i]->Release();
   }
   CoTaskMemFree(activates);
-  return count > 0;
+  return found_working_hw;
 }
 
 constexpr DWORD kTouchDownFlags =
